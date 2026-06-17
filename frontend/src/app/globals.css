@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #4648d4;
+  --color-secondary: #4e45d5;
+  --color-tertiary: #8127cf;
+  --color-background: #f7f9fb;
+  --color-surface: #ffffff;
+  --color-muted: #eceef0;
+  --color-ink: #191c1e;
+  --color-soft-ink: #464554;
+  --shadow-soft: 0 10px 30px rgba(36, 35, 80, 0.08);
+  --shadow-float: 0 24px 70px rgba(70, 72, 212, 0.16);
+}
+
+:root {
+  --background: #f7f9fb;
+  --foreground: #191c1e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+@utility glass {
+  background: rgba(255, 255, 255, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+}
+
+@utility ui-card {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(199, 196, 215, 0.55);
+  box-shadow: var(--shadow-soft);
+}
+
+@utility text-label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
