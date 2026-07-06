@@ -24,25 +24,51 @@ CREATE TABLE public.profiles (
 CREATE TABLE public.goals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES public.profiles(id),
-  title TEXT NOT NULL,                -- "Launch my side project"
-  category TEXT,                      -- 'work', 'personal', 'health', 'learning'
-  timeframe TEXT,                     -- '1 month', '3 months', '6 months'
+  title TEXT NOT NULL,
+  category TEXT,
+  timeframe TEXT,
   is_active BOOLEAN DEFAULT TRUE,
+  progress_percent INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- MILESTONES (parent containers for related tasks within a goal)
+CREATE TABLE public.milestones (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  goal_id UUID REFERENCES public.goals(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT,
+  milestone_order INTEGER,
+  scheduled_date DATE,
+  cognitive_load_score INTEGER CHECK (cognitive_load_score BETWEEN 1 AND 10),
+  estimated_minutes INTEGER DEFAULT 90,
+  status TEXT DEFAULT 'pending',
+  progress_percent INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW(),
+  completed_at TIMESTAMP
 );
 
 -- TASKS
 CREATE TABLE public.tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES public.profiles(id),
-  goal_id UUID REFERENCES public.goals(id),   -- optional link to a goal
+  goal_id UUID REFERENCES public.goals(id),
+  milestone_id UUID REFERENCES public.milestones(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   description TEXT,
   cognitive_load_score INTEGER CHECK (cognitive_load_score BETWEEN 1 AND 10),
-  status TEXT DEFAULT 'pending',      -- 'pending', 'active', 'completed', 'rerouted'
-  source TEXT DEFAULT 'manual',       -- 'manual', 'ai_generated' (micro-steps)
-  parent_task_id UUID REFERENCES public.tasks(id),  -- for micro-steps
-  step_order INTEGER,                 -- order within a split parent task
+  status TEXT DEFAULT 'pending',
+  source TEXT DEFAULT 'manual',
+  parent_task_id UUID REFERENCES public.tasks(id),
+  step_order INTEGER,
+  scheduled_date DATE,
+  milestone_order INTEGER,
+  is_milestone BOOLEAN DEFAULT FALSE,
+  estimated_minutes INTEGER,
+  daily_assigned_date DATE,
+  scheduled_block_start TIME,
+  scheduled_block_end TIME,
   xp_earned INTEGER,
   created_at TIMESTAMP DEFAULT NOW(),
   completed_at TIMESTAMP
@@ -85,6 +111,8 @@ CREATE TABLE public.copilot_logs (
   message_type TEXT,                  -- 'micro_step', 'proactive', 'user_initiated'
   task_id UUID REFERENCES public.tasks(id),
   energy_level_at_time TEXT,
+  user_message TEXT,
+  assistant_reply TEXT,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -135,6 +163,7 @@ CREATE TABLE public.user_integrations (
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.goals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.milestones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.energy_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.session_logs ENABLE ROW LEVEL SECURITY;
@@ -146,6 +175,9 @@ CREATE POLICY "Users see own data" ON public.profiles
   FOR ALL USING (auth.uid() = id);
 
 CREATE POLICY "Users see own data" ON public.goals
+  FOR ALL USING (auth.uid() = user_id);
+
+CREATE POLICY "Users see own data" ON public.milestones
   FOR ALL USING (auth.uid() = user_id);
 
 CREATE POLICY "Users see own data" ON public.tasks

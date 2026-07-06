@@ -24,6 +24,24 @@ def _would_reroute(load: int, effective_capacity: int) -> bool:
     return load - effective_capacity > 2
 
 
+def dedupe_tasks_by_id(tasks: list[dict]) -> list[dict]:
+    """Keep one row per task id; prefer visible entries when duplicates exist."""
+    by_id: dict[str, dict] = {}
+    for task in tasks:
+        tid = task.get("id")
+        if not tid:
+            continue
+        prev = by_id.get(tid)
+        if prev is None:
+            by_id[tid] = task
+            continue
+        prev_hidden = prev.get("visible") is False
+        cur_hidden = task.get("visible") is False
+        if prev_hidden and not cur_hidden:
+            by_id[tid] = task
+    return list(by_id.values())
+
+
 def _fetch_pending_children(db: Client, parent_id: str) -> list[dict]:
     resp = (
         db.table("tasks")
@@ -153,7 +171,12 @@ def prepare_routing_pool(
         if pid:
             children_by_parent.setdefault(pid, []).append(t)
 
-    top_level = [t for t in pending_tasks if not t.get("parent_task_id")]
+    top_level = [
+        t for t in pending_tasks
+        if not t.get("parent_task_id")
+        and not t.get("is_milestone")
+        and not t.get("milestone_id")
+    ]
     top_level_ids = {t["id"] for t in top_level}
     for parent in active_parents:
         if parent["id"] not in top_level_ids:
@@ -249,7 +272,10 @@ def route_with_splits(
             "parent_groups": list(parent_meta.values()),
         }
 
+    pool = dedupe_tasks_by_id(pool)
     result = route_tasks(pool, energy_score, peak_focus_time, focus_titles=focus_titles)
-    result["tasks"] = enrich_routed_tasks(result["tasks"], parent_meta)
+    result["tasks"] = dedupe_tasks_by_id(
+        enrich_routed_tasks(result["tasks"], parent_meta)
+    )
     result["parent_groups"] = list(parent_meta.values())
     return result

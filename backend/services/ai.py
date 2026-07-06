@@ -32,6 +32,100 @@ def _extract_json_array(text: str) -> list:
     return json.loads(match.group())
 
 
+def _is_quota_error(exc: Exception) -> bool:
+    s = str(exc)
+    return "429" in s or "RESOURCE_EXHAUSTED" in s or "quota" in s.lower()
+
+
+def fallback_decompose_goal(goal_title: str) -> list[dict]:
+    """Rule-based milestones when Gemini is unavailable."""
+    short = goal_title[:55]
+    return [
+        {
+            "title": f"Define scope and plan for {short}",
+            "cognitive_load_score": 6,
+            "estimated_minutes": 90,
+            "reasoning": "Foundation milestone",
+        },
+        {
+            "title": f"Build core deliverable: {short}",
+            "cognitive_load_score": 8,
+            "estimated_minutes": 120,
+            "reasoning": "Main execution",
+        },
+        {
+            "title": f"Review and refine {short}",
+            "cognitive_load_score": 6,
+            "estimated_minutes": 90,
+            "reasoning": "Polish and validate",
+        },
+    ]
+
+
+def fallback_milestone_tasks(milestone_title: str, load: int, est: int) -> list[dict]:
+    """Rule-based child tasks when Gemini is unavailable."""
+    chunk = max(20, est // 3)
+    return [
+        {"title": f"Prepare and gather inputs for {milestone_title[:40]}", "cognitive_load_score": max(1, load - 2), "estimated_minutes": chunk},
+        {"title": f"Execute main work on {milestone_title[:40]}", "cognitive_load_score": load, "estimated_minutes": chunk},
+        {"title": f"Review and complete {milestone_title[:40]}", "cognitive_load_score": max(1, load - 1), "estimated_minutes": chunk},
+    ]
+
+
+def normalize_copilot_milestones(data: dict) -> list[dict]:
+    """Ensure Co-Pilot output is milestone-shaped (milestone → tasks)."""
+    milestones = data.get("suggested_milestones") or []
+    parsed: list[dict] = []
+    for m in milestones:
+        if not isinstance(m, dict) or not m.get("title"):
+            continue
+        tasks = []
+        for t in m.get("tasks") or []:
+            if isinstance(t, dict) and t.get("title"):
+                score = int(t.get("cognitive_load_score") or 5)
+                tasks.append({
+                    "title": str(t["title"]).strip()[:80],
+                    "cognitive_load_score": max(1, min(10, score)),
+                    "estimated_minutes": int(t.get("estimated_minutes") or 30),
+                })
+        load = int(m.get("cognitive_load_score") or (max((t["cognitive_load_score"] for t in tasks), default=5)))
+        parsed.append({
+            "title": str(m["title"]).strip()[:100],
+            "cognitive_load_score": max(1, min(10, load)),
+            "estimated_minutes": int(m.get("estimated_minutes") or sum(t["estimated_minutes"] for t in tasks) or 60),
+            "tasks": tasks or [{
+                "title": str(m["title"]).strip()[:80],
+                "cognitive_load_score": load,
+                "estimated_minutes": 45,
+            }],
+        })
+
+    if parsed:
+        return parsed
+
+    flat = data.get("suggested_tasks") or []
+    if not flat:
+        return []
+
+    tasks = []
+    for t in flat:
+        if isinstance(t, dict) and t.get("title"):
+            score = int(t.get("cognitive_load_score") or 5)
+            tasks.append({
+                "title": str(t["title"]).strip()[:80],
+                "cognitive_load_score": max(1, min(10, score)),
+                "estimated_minutes": int(t.get("estimated_minutes") or 30),
+            })
+    if not tasks:
+        return []
+    return [{
+        "title": "Co-Pilot focus",
+        "cognitive_load_score": max(t["cognitive_load_score"] for t in tasks),
+        "estimated_minutes": sum(t["estimated_minutes"] for t in tasks),
+        "tasks": tasks,
+    }]
+
+
 # ---------------------------------------------------------------------------
 # Energy inference
 # ---------------------------------------------------------------------------
@@ -112,13 +206,14 @@ GOOGLE CALENDAR:
 CLICKUP WORKLOAD:
 {clickup_block}
 
-RECENT CO-PILOT CHAT ACTIVITY:
+RECENT CO-PILOT CONVERSATION:
 {copilot_block}
 
 SCORING RULES (combine ALL sources):
 - Heavy meeting day + many urgent/overdue ClickUp items → lower score (2-5)
 - Open calendar + moderate ClickUp → balanced (5-7)
 - Light meetings + few tasks + user recently asked for light work in Co-Pilot → higher (7-9)
+- If Co-Pilot conversation shows product/implementation goals, factor that into available focus (not lower energy unless user said they are tired)
 - If Co-Pilot shows repeated low-energy or break-down requests, reduce score by 1-2
 - All-day calendar markers are NOT meetings
 
@@ -141,7 +236,13 @@ Respond ONLY with this exact JSON — no markdown fences:
 # Co-pilot context builder
 # ---------------------------------------------------------------------------
 
-def build_copilot_context(user_id: str, supabase) -> str:
+def build_copilot_context(
+    user_id: str,
+    supabase,
+    *,
+    energy_score: int | None = None,
+    energy_level: str | None = None,
+) -> str:
     """
     Build a rich system-prompt from the user's current state.
     Includes profile, energy, goals, tasks, and connected integrations.
@@ -215,8 +316,13 @@ def build_copilot_context(user_id: str, supabase) -> str:
     except Exception:
         integrations_text = "No external tools connected yet."
 
-    energy_level = energy["confirmed_level"] if energy else "unknown"
-    energy_score = energy["confirmed_score"] if energy else "unknown"
+    energy_level = energy_level or (energy["confirmed_level"] if energy else "unknown")
+    energy_score = energy_score if energy_score is not None else (
+        energy["confirmed_score"] if energy else "unknown"
+    )
+
+    from services.copilot_history import fetch_recent_copilot_conversation
+    copilot_conversation = fetch_recent_copilot_conversation(supabase, user_id)
 
     calendar_block = "No calendar data logged today."
     if energy:
@@ -249,6 +355,9 @@ TODAY'S GOOGLE CALENDAR (from morning check-in):
 CLICKUP TASKS (live from connected workspace):
 {clickup_block}
 
+RECENT CO-PILOT CONVERSATION (use this to infer what the user is building and wants today):
+{copilot_conversation}
+
 Active goals:
 {goals_text}
 - Pending tasks:
@@ -262,9 +371,11 @@ BEHAVIOR RULES:
 - When asked to break down a task, return exactly 3-5 micro-steps, each under 15 words.
 - Be warm and encouraging, never critical.
 - Keep responses under 150 words unless breaking down a task.
-- Reference the user's actual tasks, goals, energy level, calendar, and ClickUp workload in every response.
-- When planning the day, prioritise ClickUp items that are due today or overdue IF they match current energy.
+- Reference the user's actual tasks, goals, energy level, calendar, ClickUp workload, and Co-Pilot conversation in every response.
+- When the user discussed product features, roadmap, or implementation in Co-Pilot chat, suggested tasks MUST advance those goals — never generic admin/email unless they asked.
+- When planning the day, prioritise ClickUp items that are due today or overdue IF they match current energy AND user-stated priorities from chat.
 - Prefer ClickUp + calendar together: schedule deep work in open calendar blocks, light ClickUp admin in low-energy windows.
+- Match cognitive load to CURRENT energy ({energy_level}, {energy_score}/10): low energy → loads 1-4 only; high → can include 6-10.
 - Use their work style and peak focus time to time suggestions appropriately.
 
 When the user asks what to do, wants ideas, planning help, or proactive energy guidance, include concrete task suggestions in suggested_tasks (see response format)."""
@@ -305,38 +416,90 @@ def _format_integrations(integrations: list) -> str:
 # AI goal decomposition
 # ---------------------------------------------------------------------------
 
-def decompose_goal(goal_title: str, category: str, timeframe: str, profile: dict) -> list[dict]:
+def decompose_goal(goal_title: str, category: str, timeframe: str, profile: dict) -> tuple[list[dict], bool]:
     """
-    Break a user goal into 5–8 structured tasks with cognitive load scores.
+    Break a user goal into 4–6 substantive milestones (~1+ hour each).
 
-    Returns: [{ title, cognitive_load_score, reasoning }, ...]
+    Returns: (milestones, used_fallback)
     """
-    prompt = f"""You are a productivity AI helping a user break down a goal into concrete tasks.
+    prompt = f"""You are a productivity AI helping a user plan a meaningful goal — not a checkbox list.
 
 GOAL: "{goal_title}"
 CATEGORY: {category}
 TIMEFRAME: {timeframe}
 USER ROLE: {profile.get('role', 'professional')}
 
-Generate 5–8 specific, immediately actionable tasks that would help achieve this goal.
-Assign each a cognitive_load_score (1–10):
-  - 1–3: Light  (admin, research, reading, quick emails)
-  - 4–6: Moderate (meetings, planning, standard work)
-  - 7–10: Deep work (strategic writing, complex building, design decisions)
+Decompose this goal into 4–6 MILESTONES — each representing real, focused work (roughly 60–180 minutes).
+Do NOT create trivial micro-tasks (no "send one email", "open a doc", "5-minute review").
+Each milestone should move the goal forward in a substantive way.
+
+Assign each milestone:
+- cognitive_load_score (1–10): most milestones should be 5–9 (meaningful work, not admin crumbs)
+- estimated_minutes: realistic focused time (60–180)
+- reasoning: why this milestone matters (max 12 words)
+
+Order milestones logically (foundation → execution → polish).
 
 Respond ONLY with a JSON array — no markdown, no explanation:
-[{{"title": "<task title, max 10 words>", "cognitive_load_score": <int 1-10>, "reasoning": "<why this load score, max 8 words>"}}]"""
+[{{"title": "<milestone title, max 14 words>", "cognitive_load_score": <int 5-9>, "estimated_minutes": <int 60-180>, "reasoning": "<why, max 12 words>"}}]"""
 
-    response = _client.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=800,
-            temperature=0.5,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    return _extract_json_array(response.text)
+    try:
+        response = _client.models.generate_content(
+            model=_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=900,
+                temperature=0.4,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        return _extract_json_array(response.text), False
+    except Exception as exc:
+        if _is_quota_error(exc):
+            return fallback_decompose_goal(goal_title), True
+        raise
+
+
+def decompose_milestone_tasks(
+    milestone_title: str,
+    cognitive_load_score: int,
+    estimated_minutes: int,
+    profile: dict,
+) -> list[dict]:
+    """
+    Break a milestone into 3–5 actionable tasks that fit within the milestone scope.
+
+    Returns: [{ title, cognitive_load_score, estimated_minutes }, ...]
+    """
+    prompt = f"""You are a productivity AI breaking a milestone into concrete tasks for a task manager.
+
+MILESTONE: "{milestone_title}"
+MILESTONE LOAD: {cognitive_load_score}/10
+TOTAL TIME BUDGET: ~{estimated_minutes} minutes across all tasks
+
+Create 3–5 specific tasks that together complete this milestone.
+Each task should be completable in one focused session (15–60 minutes).
+Assign cognitive_load_score (1–10) and estimated_minutes per task.
+Sum of estimated_minutes should be roughly {estimated_minutes} (±20%).
+
+Respond ONLY with a JSON array — no markdown:
+[{{"title": "<task, max 12 words>", "cognitive_load_score": <int 1-10>, "estimated_minutes": <int 15-60>}}]"""
+
+    try:
+        response = _client.models.generate_content(
+            model=_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=700,
+                temperature=0.4,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        return _extract_json_array(response.text)
+    except Exception as exc:
+        if _is_quota_error(exc):
+            return fallback_milestone_tasks(milestone_title, cognitive_load_score, estimated_minutes)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -534,18 +697,20 @@ def _heuristic_split(task_title: str, parent_load: int, effective_capacity: int)
 def chat_with_copilot(system_context: str, user_message: str) -> dict:
     """
     Send a user message to Gemini with the full co-pilot system context.
-    Returns { reply: str, suggested_tasks: [{ title, cognitive_load_score }] }.
+    Returns { reply, suggested_tasks, suggested_milestones, ai_fallback }.
     """
     format_rules = """
 RESPONSE FORMAT (mandatory):
 Reply with ONLY valid JSON — no markdown fences, no text outside the JSON:
-{"reply": "<warm conversational message, max 120 words>", "suggested_tasks": [{"title": "<max 10 words>", "cognitive_load_score": <1-10>}]}
+{"reply": "<warm conversational message, max 120 words>", "suggested_milestones": [{"title": "<milestone, max 12 words>", "cognitive_load_score": <1-10>, "estimated_minutes": <30-120>, "tasks": [{"title": "<task, max 12 words>", "cognitive_load_score": <1-10>, "estimated_minutes": <15-60>}]}]}
 
-Rules for suggested_tasks:
-- Include 2-4 tasks when the user asks for ideas, planning help, what to focus on, light options, or proactive energy guidance.
-- Match loads to current energy: low (1-3), balanced (3-6), high (6-10).
-- Each task must be actionable today and distinct.
-- Use an empty array [] for pure Q&A or when no new tasks are appropriate.
+Rules for suggested_milestones:
+- Include 1-2 milestones when the user asks for ideas, planning help, what to focus on, or proactive guidance.
+- Each milestone groups 2-4 related tasks that together complete meaningful work today.
+- Tasks MUST connect to the user's active goals and recent Co-Pilot conversation.
+- Do NOT suggest unrelated busywork unless explicitly asked.
+- Match loads to CURRENT energy in context: low (1-4), balanced (3-6), high (6-10).
+- Use an empty array [] for pure Q&A when no new work is appropriate.
 """
 
     try:
@@ -554,38 +719,50 @@ Rules for suggested_tasks:
             contents=user_message,
             config=types.GenerateContentConfig(
                 system_instruction=system_context + format_rules,
-                max_output_tokens=700,
+                max_output_tokens=900,
                 temperature=0.7,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         data = _extract_json(response.text)
-        tasks = []
-        for t in data.get("suggested_tasks") or []:
-            if isinstance(t, dict) and t.get("title"):
-                score = t.get("cognitive_load_score", 5)
-                try:
-                    score = int(score)
-                except (TypeError, ValueError):
-                    score = 5
-                tasks.append({
-                    "title": str(t["title"]).strip()[:80],
-                    "cognitive_load_score": max(1, min(10, score)),
-                })
+        milestones = normalize_copilot_milestones(data)
+        flat_tasks = []
+        for m in milestones:
+            flat_tasks.extend(m.get("tasks") or [])
         reply = str(data.get("reply", "")).strip()
         if not reply:
             reply = "Here's what I'd suggest for today."
-        return {"reply": reply, "suggested_tasks": tasks}
-    except Exception:
-        # Fallback: plain-text reply, no structured tasks
-        response = _client.models.generate_content(
-            model=_MODEL,
-            contents=user_message,
-            config=types.GenerateContentConfig(
-                system_instruction=system_context,
-                max_output_tokens=500,
-                temperature=0.7,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
-        return {"reply": response.text.strip(), "suggested_tasks": []}
+        return {
+            "reply": reply,
+            "suggested_tasks": flat_tasks,
+            "suggested_milestones": milestones,
+            "ai_fallback": False,
+        }
+    except Exception as exc:
+        if _is_quota_error(exc):
+            milestones = normalize_copilot_milestones({
+                "suggested_milestones": [{
+                    "title": "Today's focus",
+                    "cognitive_load_score": 5,
+                    "estimated_minutes": 60,
+                    "tasks": [
+                        {"title": "Continue highest-priority goal work", "cognitive_load_score": 5, "estimated_minutes": 30},
+                        {"title": "Ship one visible progress item", "cognitive_load_score": 6, "estimated_minutes": 30},
+                    ],
+                }],
+            })
+            return {
+                "reply": (
+                    "AI quota reached for today — here are rule-based milestone suggestions. "
+                    "They'll reset tomorrow, or enable billing in Google AI Studio."
+                ),
+                "suggested_tasks": [t for m in milestones for t in m.get("tasks", [])],
+                "suggested_milestones": milestones,
+                "ai_fallback": True,
+            }
+        return {
+            "reply": "I had trouble generating a structured plan. Try again in a moment.",
+            "suggested_tasks": [],
+            "suggested_milestones": [],
+            "ai_fallback": True,
+        }

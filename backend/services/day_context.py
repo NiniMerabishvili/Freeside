@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from services.calendar import get_today_events, summarize_events
 from services.clickup import get_clickup_context_from_db, fetch_clickup_summary, format_clickup_block
-from services.routing_log import fetch_recent_copilot_summary
+from services.copilot_history import fetch_recent_copilot_conversation
 
 
 def _load_clickup_row(db, user_id: str) -> dict | None:
@@ -62,7 +62,7 @@ def gather_day_context(db, user_id: str, profile: dict | None = None) -> dict:
         else get_clickup_context_from_db(db, user_id)
     )
 
-    copilot_summary = fetch_recent_copilot_summary(db, user_id)
+    copilot_summary = fetch_recent_copilot_conversation(db, user_id)
 
     has_copilot = copilot_summary and "No recent" not in copilot_summary
     has_clickup_tasks = bool(

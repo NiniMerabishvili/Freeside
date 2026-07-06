@@ -18,6 +18,20 @@ from services.db_compat import update_task_completed
 from services.routing_log import log_routing_snapshot
 from services.task_split import route_with_splits, maybe_complete_parent, parent_progress_percent
 from services.day_context import get_day_plan_focus
+from services.goal_planning import (
+    assign_milestones_to_days,
+    forecast_energy_landscape,
+    insert_scheduled_milestones,
+    sync_goal_progress,
+    sync_milestone_progress,
+    insert_copilot_milestones,
+    task_is_due_for_today,
+)
+from services.daily_scheduler import (
+    build_milestone_groups,
+    generate_daily_schedule,
+    milestone_task_is_routable_today,
+)
 
 router = APIRouter()
 
@@ -64,6 +78,11 @@ class ConfirmTasksRequest(BaseModel):
 class ConfirmBrainDumpRequest(BaseModel):
     user_id: str
     tasks: list
+
+
+class ConfirmCopilotMilestonesRequest(BaseModel):
+    user_id: str
+    milestones: list
 
 
 class TaskBreakdownRequest(BaseModel):
@@ -199,10 +218,13 @@ def get_routed_tasks(
 
     Optional energy_score / energy_level override live slider previews before confirm.
     """
-    # Fetch user profile for peak_focus_time and AI split context
+    # Fetch user profile for routing, calendar, and daily scheduling
     profile_resp = (
         supabase.table("profiles")
-        .select("peak_focus_time, role, work_style")
+        .select(
+            "peak_focus_time, role, work_style, daily_work_hours, "
+            "google_calendar_connected, google_refresh_token"
+        )
         .eq("id", user_id)
         .single()
         .execute()
@@ -252,10 +274,49 @@ def get_routed_tasks(
         .execute()
     )
     all_tasks = tasks.data or []
-    pending = [t for t in all_tasks if t.get("status") == "pending"]
+    pending = [
+        t for t in all_tasks
+        if t.get("status") == "pending"
+        and task_is_due_for_today(t)
+        and not t.get("is_milestone")
+    ]
+
+    daily_schedule = None
+    if not using_override:
+        daily_schedule = generate_daily_schedule(
+            supabase, user_id, profile, energy_score, peak_focus_time
+        )
+
+    pending = [
+        t for t in pending
+        if (milestone_task_is_routable_today(t) if t.get("milestone_id") else True)
+    ]
+
+    # Attach milestone titles for UI grouping
+    milestone_ids = {t["milestone_id"] for t in pending if t.get("milestone_id")}
+    milestone_titles: dict[str, str] = {}
+    if milestone_ids:
+        try:
+            ms_rows = (
+                supabase.table("milestones")
+                .select("id, title")
+                .in_("id", list(milestone_ids))
+                .execute()
+            ).data or []
+            milestone_titles = {m["id"]: m["title"] for m in ms_rows}
+        except Exception:
+            pass
+    for t in pending:
+        mid = t.get("milestone_id")
+        if mid and mid in milestone_titles:
+            t["milestone_title"] = milestone_titles[mid]
+
     active_parents = [
         t for t in all_tasks
-        if t.get("status") == "active" and not t.get("parent_task_id")
+        if t.get("status") == "active"
+        and not t.get("parent_task_id")
+        and not t.get("is_milestone")
+        and not t.get("milestone_id")
     ]
 
     result = route_with_splits(
@@ -279,6 +340,12 @@ def get_routed_tasks(
             result["effective_capacity"],
         )
 
+    milestone_groups = build_milestone_groups(
+        supabase,
+        result["tasks"],
+        (daily_schedule or {}).get("deferred_tasks"),
+    )
+
     return {
         "energy_set":          True,
         "energy_level":        energy_level,
@@ -289,43 +356,62 @@ def get_routed_tasks(
         "active_count":        result["active_count"],
         "rerouted_count":      result["rerouted_count"],
         "parent_groups":       result.get("parent_groups", []),
+        "milestone_groups":    milestone_groups,
+        "daily_schedule":      daily_schedule,
     }
 
 
 @router.post("/decompose-goal")
 def decompose_goal_route(request: GoalDecomposeRequest):
     """
-    Ask Gemini to break a goal into 5–8 structured tasks with cognitive load scores.
-    Returns the task list for user review before inserting into the pool.
+    Break a goal into 4–6 substantive milestones with multi-day schedule preview.
+    Returns milestones for user review before inserting.
     """
     profile_resp = (
         supabase.table("profiles")
-        .select("role, work_style")
+        .select("role, work_style, google_calendar_connected, google_refresh_token")
         .eq("id", request.user_id)
         .single()
         .execute()
     )
     profile = profile_resp.data or {}
 
-    tasks = decompose_goal(request.goal_title, request.category, request.timeframe, profile)
-    return {"tasks": tasks, "goal_title": request.goal_title}
+    milestones, ai_fallback = decompose_goal(
+        request.goal_title, request.category, request.timeframe, profile
+    )
+    landscape = forecast_energy_landscape(supabase, request.user_id, profile)
+    scheduled = assign_milestones_to_days(milestones, landscape)
+    return {
+        "tasks": scheduled,
+        "milestones": scheduled,
+        "goal_title": request.goal_title,
+        "landscape": landscape,
+        "ai_fallback": ai_fallback,
+    }
 
 
 @router.post("/decompose-goal/confirm")
 def confirm_decomposed_tasks(request: ConfirmTasksRequest):
-    """Insert user-approved AI-decomposed tasks into the task pool."""
-    inserted = []
-    for t in request.tasks:
-        row = supabase.table("tasks").insert({
-            "user_id":              request.user_id,
-            "title":                t["title"],
-            "cognitive_load_score": t.get("cognitive_load_score", 5),
-            "goal_id":              request.goal_id,
-            "source":               "ai_decomposed",
-        }).execute()
-        if row.data:
-            inserted.append(row.data[0])
-    return {"inserted": len(inserted), "tasks": inserted}
+    """Insert approved milestones with multi-day scheduling (not all into today)."""
+    if not request.goal_id:
+        raise HTTPException(status_code=400, detail="goal_id is required for milestone planning")
+
+    profile_resp = (
+        supabase.table("profiles")
+        .select("role, work_style, google_calendar_connected, google_refresh_token")
+        .eq("id", request.user_id)
+        .single()
+        .execute()
+    )
+    profile = profile_resp.data or {}
+
+    return insert_scheduled_milestones(
+        supabase,
+        request.user_id,
+        request.goal_id,
+        request.tasks,
+        profile,
+    )
 
 
 @router.post("/brain-dump")
@@ -348,19 +434,22 @@ def brain_dump_route(request: BrainDumpRequest):
 
 
 @router.post("/copilot-suggestions/confirm")
-def confirm_copilot_tasks(request: ConfirmBrainDumpRequest):
-    """Insert user-approved Co-Pilot suggested tasks into the task pool."""
-    inserted = []
-    for t in request.tasks:
-        row = supabase.table("tasks").insert({
-            "user_id":              request.user_id,
-            "title":                t["title"],
-            "cognitive_load_score": t.get("cognitive_load_score", 5),
-            "source":               "copilot_suggested",
-        }).execute()
-        if row.data:
-            inserted.append(row.data[0])
-    return {"inserted": len(inserted), "tasks": inserted}
+def confirm_copilot_tasks(request: ConfirmCopilotMilestonesRequest):
+    """Insert Co-Pilot suggested milestones + child tasks."""
+    profile_resp = (
+        supabase.table("profiles")
+        .select("role, work_style, peak_focus_time, daily_work_hours")
+        .eq("id", request.user_id)
+        .single()
+        .execute()
+    )
+    profile = profile_resp.data or {}
+    return insert_copilot_milestones(
+        supabase,
+        request.user_id,
+        request.milestones,
+        profile,
+    )
 
 
 @router.post("/brain-dump/confirm")
@@ -506,6 +595,30 @@ def complete_task(task_id: str, request: TaskCompleteRequest):
         maybe_complete_parent(supabase, request.user_id, parent_id)
         parent_progress = parent_progress_percent(supabase, parent_id)
 
+    goal_progress = None
+    goal_id = task.get("goal_id")
+    milestone_id = task.get("milestone_id")
+    milestone_progress = None
+
+    if milestone_id:
+        milestone_progress = sync_milestone_progress(supabase, milestone_id)
+        ms_resp = (
+            supabase.table("milestones")
+            .select("goal_id")
+            .eq("id", milestone_id)
+            .single()
+            .execute()
+        )
+        if ms_resp.data and ms_resp.data.get("goal_id"):
+            goal_id = ms_resp.data["goal_id"]
+
+    if goal_id and (
+        task.get("is_milestone")
+        or task.get("source") == "goal_milestone"
+        or milestone_id
+    ):
+        goal_progress = sync_goal_progress(supabase, goal_id)
+
     return {
         "xp_earned": xp_earned,
         "xp_total": new_xp,
@@ -513,4 +626,8 @@ def complete_task(task_id: str, request: TaskCompleteRequest):
         "completed_at": now_iso,
         "parent_task_id": parent_id,
         "parent_progress_percent": parent_progress,
+        "goal_id": goal_id,
+        "goal_progress_percent": goal_progress,
+        "milestone_id": milestone_id,
+        "milestone_progress_percent": milestone_progress,
     }

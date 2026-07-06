@@ -74,7 +74,11 @@ export default function EnergyPanel({ onConfirmed, onScoreChange }: Props) {
       .then(r => r.json())
       .then((d: Suggestion) => {
         setSuggestion(d)
-        if (d.mode === 'ai_suggested') setScore(d.ai_suggested_score)
+        if (d.mode === 'ai_suggested') {
+          setScore(d.ai_suggested_score)
+          const lvl = d.ai_suggested_score >= 7 ? 'high' : d.ai_suggested_score >= 4 ? 'balanced' : 'low'
+          onScoreChangeRef.current?.(lvl, d.ai_suggested_score)
+        }
         return d
       })
       .catch(() => {

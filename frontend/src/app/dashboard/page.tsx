@@ -3,17 +3,33 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import {
   ChevronDown, ChevronUp, CheckCircle2, Loader2, Lock, Pencil, Plus, Scissors, Sparkles,
-  Square, CheckSquare, Trash2, X, Brain, Zap,
+  Square, CheckSquare, Target, Trash2, X, Brain, Zap,
 } from 'lucide-react'
 import AppShell from '@/components/AppShell'
 import EnergyPanel from '@/components/EnergyPanel'
 import SleepPanel from '@/components/SleepPanel'
-import CoPilot, { type CopilotSuggestedTask } from '@/components/CoPilot'
-import SuggestedTasksPanel, { type SuggestedTask } from '@/components/SuggestedTasksPanel'
+import CoPilot, { type CopilotSuggestedMilestone } from '@/components/CoPilot'
+import SuggestedTasksPanel, { type SuggestedMilestone } from '@/components/SuggestedTasksPanel'
+import GoalsPanel from '@/components/GoalsPanel'
 import { supabase } from '@/lib/supabase'
 import { effectiveTaskXp, taskXp } from '@/lib/xp'
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+
+function dedupeTasksById(tasks: Task[]): Task[] {
+  const byId = new Map<string, Task>()
+  for (const task of tasks) {
+    const prev = byId.get(task.id)
+    if (!prev) {
+      byId.set(task.id, task)
+      continue
+    }
+    const prevHidden = prev.visible === false
+    const curHidden = task.visible === false
+    if (prevHidden && !curHidden) byId.set(task.id, task)
+  }
+  return Array.from(byId.values())
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -35,6 +51,22 @@ type Task = {
   progress_percent?: number
   is_blocked?: boolean
   step_order?: number
+  milestone_id?: string | null
+  milestone_title?: string
+  scheduled_block_start?: string | null
+  scheduled_block_end?: string | null
+  estimated_minutes?: number
+  defer_reason?: string
+}
+
+type MilestoneGroup = {
+  milestone_id: string
+  milestone_title: string
+  goal_id?: string
+  progress_percent: number
+  active: Task[]
+  blocked: Task[]
+  deferred?: Task[]
 }
 
 type ParsedTask = { title: string; cognitive_load_score: number; reasoning?: string }
@@ -281,11 +313,18 @@ type ParentGroup = {
 }
 
 function buildTaskGroups(tasks: Task[]): { standalone: Task[]; groups: ParentGroup[] } {
+  const deduped = dedupeTasksById(tasks)
+  const parentIdsWithChildren = new Set(
+    deduped.filter(t => t.parent_task_id).map(t => t.parent_task_id as string),
+  )
   const standalone: Task[] = []
   const byParent = new Map<string, ParentGroup>()
 
-  for (const t of tasks) {
+  for (const t of deduped) {
+    if (t.milestone_id) continue
     if (!t.parent_task_id) {
+      // Split parent shells are shown via subtask groups only
+      if (parentIdsWithChildren.has(t.id)) continue
       if (t.visible !== false) standalone.push(t)
       continue
     }
@@ -307,6 +346,8 @@ function buildTaskGroups(tasks: Task[]): { standalone: Task[]; groups: ParentGro
   }
 
   for (const g of byParent.values()) {
+    g.active = dedupeTasksById(g.active)
+    g.blocked = dedupeTasksById(g.blocked)
     g.active.sort((a, b) => (a.step_order ?? 99) - (b.step_order ?? 99))
     g.blocked.sort((a, b) => (a.step_order ?? 99) - (b.step_order ?? 99))
   }
@@ -357,6 +398,97 @@ function ParentTaskGroup({ group, userId, energyScore, energyLevel, onCompleted,
           />
         ))}
       </div>
+    </div>
+  )
+}
+
+function formatBlockTime(value: string | null | undefined): string | null {
+  if (!value) return null
+  const parts = value.split(':')
+  if (parts.length < 2) return null
+  const h = parseInt(parts[0], 10)
+  const m = parts[1]
+  const ampm = h >= 12 ? 'PM' : 'AM'
+  const h12 = h % 12 || 12
+  return `${h12}:${m} ${ampm}`
+}
+
+function MilestoneTaskGroup({
+  group,
+  userId,
+  energyScore,
+  energyLevel,
+  defaultExpanded = true,
+  onCompleted,
+  onUpdated,
+  onDeleted,
+}: {
+  group: MilestoneGroup
+  userId: string
+  energyScore?: number
+  energyLevel?: string
+  defaultExpanded?: boolean
+  onCompleted: (task: Task, xpTotal?: number) => void
+  onUpdated: (task: Task) => void
+  onDeleted: (id: string) => void
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
+  const allTasks = [...group.active, ...(group.blocked ?? []), ...(group.deferred ?? [])]
+
+  return (
+    <div className="rounded-lg border border-[#dce3f0] bg-white shadow-sm">
+      <button
+        type="button"
+        onClick={() => setExpanded(v => !v)}
+        className="flex w-full items-start gap-3 border-b border-[#eceef4] px-4 py-3 text-left hover:bg-[#fafbfc]"
+      >
+        <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-[#e8e7ff] text-[#4648d4]">
+          <Target className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold uppercase tracking-widest text-[#4648d4]">Milestone</p>
+          <p className="mt-0.5 truncate text-sm font-semibold text-[#191c1e]">{group.milestone_title}</p>
+          <div className="mt-2 flex items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[#eceef4]">
+              <div
+                className="h-full rounded-full bg-[#4648d4] transition-all"
+                style={{ width: `${group.progress_percent}%` }}
+              />
+            </div>
+            <span className="text-xs font-bold text-[#4648d4]">{group.progress_percent}%</span>
+          </div>
+          <p className="mt-1 text-[10px] text-[#6b7080]">
+            {group.active.length} active · {(group.blocked?.length ?? 0) + (group.deferred?.length ?? 0)} waiting
+          </p>
+        </div>
+        {expanded ? (
+          <ChevronUp className="mt-1 h-4 w-4 shrink-0 text-[#6b7080]" />
+        ) : (
+          <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-[#6b7080]" />
+        )}
+      </button>
+      {expanded && (
+        <div className="space-y-px p-2">
+          {allTasks.length === 0 ? (
+            <p className="px-3 py-4 text-center text-xs text-[#6b7080]">No tasks scheduled for this milestone today.</p>
+          ) : (
+            allTasks.map(t => (
+              <TaskCard
+                key={t.id}
+                task={t}
+                userId={userId}
+                energyScore={energyScore}
+                energyLevel={energyLevel}
+                isSubtask
+                blocked={t.visible === false || !!t.defer_reason}
+                onCompleted={onCompleted}
+                onUpdated={onUpdated}
+                onDeleted={onDeleted}
+              />
+            ))
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -599,6 +731,13 @@ function TaskCard({ task, userId, energyScore, energyLevel, isSubtask, blocked, 
             </p>
           )}
           <p className={`truncate text-sm font-medium text-[#191c1e] ${isBlocked ? 'text-[#6b7080]' : ''}`}>{task.title}</p>
+          {task.scheduled_block_start && (
+            <p className="mt-0.5 text-[10px] font-semibold text-[#8127cf]">
+              {formatBlockTime(task.scheduled_block_start)}
+              {task.scheduled_block_end && ` – ${formatBlockTime(task.scheduled_block_end)}`}
+              {task.estimated_minutes ? ` · ~${task.estimated_minutes} min` : ''}
+            </p>
+          )}
           {task.description && <p className="mt-0.5 text-xs text-[#6b7080] line-clamp-1">{task.description}</p>}
           {dimmed && task.reroute_reason && (
             <p className="mt-1 text-xs text-amber-600">
@@ -764,12 +903,13 @@ function CompletedTaskRow({ task, userId, onDeleted }: {
 
 // ── Right Rail ────────────────────────────────────────────────────────────────
 
-function RightRail({ userId, energyLevel, triggerMessage, onTriggerConsumed, onTasksSuggested, onReportLowEnergy }: {
+function RightRail({ userId, energyLevel, energyScore, triggerMessage, onTriggerConsumed, onTasksSuggested, onReportLowEnergy }: {
   userId: string | null
   energyLevel: string
+  energyScore: number
   triggerMessage?: { text: string; taskId?: string; type?: string } | null
   onTriggerConsumed?: () => void
-  onTasksSuggested?: (tasks: CopilotSuggestedTask[]) => void
+  onTasksSuggested?: (milestones: CopilotSuggestedMilestone[], aiFallback?: boolean) => void
   onReportLowEnergy?: () => void
 }) {
   return (
@@ -777,6 +917,7 @@ function RightRail({ userId, energyLevel, triggerMessage, onTriggerConsumed, onT
       <CoPilot
         userId={userId}
         energyLevel={energyLevel}
+        energyScore={energyScore}
         triggerMessage={triggerMessage}
         onTriggerConsumed={onTriggerConsumed}
         onTasksSuggested={onTasksSuggested}
@@ -803,10 +944,19 @@ export default function DashboardPage() {
   const [copilotTrigger, setCopilotTrigger] = useState<{
     text: string; taskId?: string; type?: string
   } | null>(null)
-  const [suggestedTasks, setSuggestedTasks] = useState<SuggestedTask[]>([])
+  const [suggestedMilestones, setSuggestedMilestones] = useState<SuggestedMilestone[]>([])
+  const [suggestionsAiFallback, setSuggestionsAiFallback] = useState(false)
   const [planningDay, setPlanningDay] = useState(false)
   const [dayPlanSummary, setDayPlanSummary] = useState<string | null>(null)
   const [xpTotal, setXpTotal] = useState(0)
+  const [goalsRefreshKey, setGoalsRefreshKey] = useState(0)
+  const [milestoneGroups, setMilestoneGroups] = useState<MilestoneGroup[]>([])
+  const [dailySchedule, setDailySchedule] = useState<{
+    budget?: { max_load_points?: number; max_focus_minutes?: number }
+    free_time?: { total_free_minutes?: number; block_count?: number }
+    selected_count?: number
+    deferred_count?: number
+  } | null>(null)
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const fetchProfileStats = useCallback(async (uid: string) => {
@@ -820,13 +970,21 @@ export default function DashboardPage() {
     }
   }, [])
 
-  const handleCopilotTasksSuggested = useCallback((incoming: CopilotSuggestedTask[]) => {
+  const handleCopilotTasksSuggested = useCallback((incoming: CopilotSuggestedMilestone[], aiFallback?: boolean) => {
     if (!incoming.length) return
-    setSuggestedTasks(
-      incoming.map(t => ({
+    setSuggestionsAiFallback(!!aiFallback)
+    setSuggestedMilestones(
+      incoming.map(m => ({
         id: crypto.randomUUID(),
-        title: t.title,
-        cognitive_load_score: t.cognitive_load_score,
+        title: m.title,
+        cognitive_load_score: m.cognitive_load_score,
+        estimated_minutes: m.estimated_minutes,
+        tasks: m.tasks.map(t => ({
+          id: crypto.randomUUID(),
+          title: t.title,
+          cognitive_load_score: t.cognitive_load_score,
+          estimated_minutes: t.estimated_minutes,
+        })),
       }))
     )
   }, [])
@@ -859,7 +1017,9 @@ export default function DashboardPage() {
       }
       const res  = await fetch(`${API}/tasks/routed?${params}`)
       const data = await res.json()
-      setTasks(data.tasks ?? [])
+      setTasks(dedupeTasksById(data.tasks ?? []))
+      setMilestoneGroups(data.milestone_groups ?? [])
+      setDailySchedule(data.daily_schedule ?? null)
       setClcsMeta({
         effective_capacity: data.effective_capacity,
         peak_boost:         data.peak_boost,
@@ -958,9 +1118,8 @@ export default function DashboardPage() {
     }
   }, [userId, energyScore, energyLevel, fetchTasks, handleEnergyConfirmed])
 
-  const handleTaskCreated = (task: Task) => {
-    setTasks(prev => [task, ...prev])
-    if (userId) fetchTasks(userId)
+  const handleTaskCreated = (_task: Task) => {
+    if (userId) void fetchTasks(userId)
   }
 
   const handleBrainDumpCreated = (newTasks: Task[]) => {
@@ -992,6 +1151,7 @@ export default function DashboardPage() {
     if (userId) {
       void fetchCompletedTasks(userId)
       void fetchTasks(userId)
+      setGoalsRefreshKey(k => k + 1)
     }
   }
 
@@ -1014,7 +1174,10 @@ export default function DashboardPage() {
   const blockedSubtasks = parentGroups.flatMap(g => g.blocked)
   const deferredWholeTasks = deferredTasks.filter(t => !t.parent_task_id)
   const futureTasks = [...blockedSubtasks, ...deferredWholeTasks]
-  const hasActiveTasks = standaloneTasks.length > 0 || parentGroups.some(g => g.active.length > 0)
+  const hasActiveTasks =
+    standaloneTasks.length > 0
+    || parentGroups.some(g => g.active.length > 0)
+    || milestoneGroups.some(g => g.active.length > 0)
 
   // When there are no visible tasks and energy is set → offer co-pilot help
   const handleRequestLightTasks = () => {
@@ -1028,6 +1191,7 @@ export default function DashboardPage() {
     <RightRail
       userId={userId}
       energyLevel={energyLevel}
+      energyScore={energyScore}
       triggerMessage={copilotTrigger}
       onTriggerConsumed={() => setCopilotTrigger(null)}
       onTasksSuggested={handleCopilotTasksSuggested}
@@ -1035,8 +1199,8 @@ export default function DashboardPage() {
     />
   )
 
-  const isFirstVisit = tasks.length === 0 && !loadingTasks && !energyLevel && suggestedTasks.length === 0
-  const showTaskSection = !isFirstVisit || suggestedTasks.length > 0 || completedTasks.length > 0
+  const isFirstVisit = tasks.length === 0 && !loadingTasks && !energyLevel && suggestedMilestones.length === 0
+  const showTaskSection = !isFirstVisit || suggestedMilestones.length > 0 || completedTasks.length > 0
 
   return (
     <AppShell active="focus" rightRail={rightRail}>
@@ -1084,6 +1248,15 @@ export default function DashboardPage() {
             </Suspense>
             <SleepPanel />
           </section>
+
+          {/* Goals — persistent anchor with milestone timeline */}
+          {userId && (
+            <GoalsPanel
+              userId={userId}
+              refreshKey={goalsRefreshKey}
+              onGoalsChanged={() => userId && void fetchTasks(userId)}
+            />
+          )}
 
           {/* Cold-start: first visit with no tasks */}
           {isFirstVisit && (
@@ -1155,12 +1328,31 @@ export default function DashboardPage() {
                 </div>
               )}
 
-              {suggestedTasks.length > 0 && (
+              {dailySchedule && !planningDay && energyLevel && (
+                <div className="mb-4 rounded-lg border border-[#dce3f0] bg-[#f8f9fc] px-4 py-3 text-xs text-[#4a4a58]">
+                  <p className="font-semibold text-[#4648d4]">Today&apos;s schedule</p>
+                  <p className="mt-1">
+                    {dailySchedule.selected_count ?? 0} milestone tasks assigned
+                    {dailySchedule.free_time?.total_free_minutes != null && (
+                      <> · {dailySchedule.free_time.total_free_minutes} min free after calendar</>
+                    )}
+                    {dailySchedule.budget?.max_load_points != null && (
+                      <> · cognitive budget {dailySchedule.budget.max_load_points} pts</>
+                    )}
+                  </p>
+                </div>
+              )}
+
+              {suggestedMilestones.length > 0 && (
                 <SuggestedTasksPanel
                   userId={userId}
-                  tasks={suggestedTasks}
-                  onChange={setSuggestedTasks}
-                  onApproved={() => fetchTasks(userId)}
+                  milestones={suggestedMilestones}
+                  onChange={setSuggestedMilestones}
+                  onApproved={() => {
+                    fetchTasks(userId)
+                    setGoalsRefreshKey(k => k + 1)
+                  }}
+                  aiFallback={suggestionsAiFallback}
                 />
               )}
 
@@ -1177,6 +1369,9 @@ export default function DashboardPage() {
                   </p>
                   <p className="mt-1 text-xs text-[#6b7080]">
                     Your other tasks need a higher-energy window. Heavy parts may appear under Future tasks below.
+                    {!energyLevel && energyScore > 0 && (
+                      <span className="block mt-1 text-[#8127cf]">Click &quot;Start my day&quot; to confirm energy and apply routing.</span>
+                    )}
                   </p>
                   <div className="mt-4 flex flex-wrap justify-center gap-2">
                     <button
@@ -1216,6 +1411,18 @@ export default function DashboardPage() {
 
               ) : (
                 <div className="space-y-3">
+                  {milestoneGroups.filter(g => g.active.length > 0 || (g.blocked?.length ?? 0) > 0).map(g => (
+                    <MilestoneTaskGroup
+                      key={g.milestone_id}
+                      group={g}
+                      userId={userId!}
+                      energyScore={energyScore}
+                      energyLevel={energyLevel}
+                      onCompleted={handleTaskCompleted}
+                      onUpdated={handleTaskUpdated}
+                      onDeleted={handleTaskDeleted}
+                    />
+                  ))}
                   {parentGroups.filter(g => g.active.length > 0).map(g => (
                     <ParentTaskGroup
                       key={g.parentId}

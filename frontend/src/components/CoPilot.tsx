@@ -8,6 +8,14 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 export type CopilotSuggestedTask = {
   title: string
   cognitive_load_score: number
+  estimated_minutes?: number
+}
+
+export type CopilotSuggestedMilestone = {
+  title: string
+  cognitive_load_score: number
+  estimated_minutes?: number
+  tasks: CopilotSuggestedTask[]
 }
 
 type Message = {
@@ -19,10 +27,11 @@ type Message = {
 type Props = {
   userId: string | null
   energyLevel: string
+  energyScore?: number
   /** When set, the CoPilot auto-sends this message (used for "Break this down" and proactive triggers) */
   triggerMessage?: { text: string; taskId?: string; type?: string } | null
   onTriggerConsumed?: () => void
-  onTasksSuggested?: (tasks: CopilotSuggestedTask[]) => void
+  onTasksSuggested?: (milestones: CopilotSuggestedMilestone[], aiFallback?: boolean) => void
   /** Fired when user says they are tired — parent should lower energy and reroute */
   onReportLowEnergy?: () => void
 }
@@ -35,7 +44,7 @@ const PROACTIVE: Record<string, string> = {
   balanced: "I'm in balanced mode today. Help me plan a productive session.",
 }
 
-export default function CoPilot({ userId, energyLevel, triggerMessage, onTriggerConsumed, onTasksSuggested, onReportLowEnergy }: Props) {
+export default function CoPilot({ userId, energyLevel, energyScore, triggerMessage, onTriggerConsumed, onTasksSuggested, onReportLowEnergy }: Props) {
   const [messages, setMessages]   = useState<Message[]>([])
   const [input, setInput]         = useState('')
   const [loading, setLoading]     = useState(false)
@@ -75,13 +84,25 @@ export default function CoPilot({ userId, energyLevel, triggerMessage, onTrigger
           message:      text,
           task_id:      taskId ?? null,
           message_type: type ?? 'user_initiated',
+          energy_score: energyScore ?? null,
+          energy_level: energyLevel || null,
         }),
       })
       const data = await res.json()
       setMessages(prev => [...prev, { role: 'assistant', text: data.reply }])
-      const suggested = (data.suggested_tasks ?? []) as CopilotSuggestedTask[]
-      if (suggested.length > 0) {
-        onTasksSuggested?.(suggested)
+      const suggestedMilestones = (data.suggested_milestones ?? []) as CopilotSuggestedMilestone[]
+      if (suggestedMilestones.length > 0) {
+        onTasksSuggested?.(suggestedMilestones, data.ai_fallback)
+      } else {
+        const flat = (data.suggested_tasks ?? []) as CopilotSuggestedTask[]
+        if (flat.length > 0) {
+          onTasksSuggested?.([{
+            title: 'Co-Pilot focus',
+            cognitive_load_score: Math.max(...flat.map(t => t.cognitive_load_score)),
+            estimated_minutes: flat.reduce((n, t) => n + (t.estimated_minutes ?? 30), 0),
+            tasks: flat,
+          }], data.ai_fallback)
+        }
       }
     } catch {
       setMessages(prev => [...prev, {
