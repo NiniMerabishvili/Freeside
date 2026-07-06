@@ -34,12 +34,16 @@ supabase: Client = create_client(
 )
 
 # Include route modules
-from routes import energy, tasks, copilot, calendar
+from routes import energy, tasks, copilot, calendar, research, profile, sleep, integrations
 
 app.include_router(energy.router, prefix="/energy", tags=["energy"])
+app.include_router(sleep.router, prefix="/sleep", tags=["sleep"])
 app.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 app.include_router(copilot.router, prefix="/copilot", tags=["copilot"])
 app.include_router(calendar.router, prefix="/calendar", tags=["calendar"])
+app.include_router(research.router, prefix="/research", tags=["research"])
+app.include_router(profile.router, prefix="/profile", tags=["profile"])
+app.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 
 
 @app.get("/health")

@@ -15,6 +15,7 @@ CREATE TABLE public.profiles (
   google_calendar_connected BOOLEAN DEFAULT FALSE,
   google_refresh_token TEXT,          -- stored encrypted
   xp_total INTEGER DEFAULT 0,
+  avatar_url TEXT,
   onboarding_completed BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT NOW()
 );
@@ -41,6 +42,8 @@ CREATE TABLE public.tasks (
   status TEXT DEFAULT 'pending',      -- 'pending', 'active', 'completed', 'rerouted'
   source TEXT DEFAULT 'manual',       -- 'manual', 'ai_generated' (micro-steps)
   parent_task_id UUID REFERENCES public.tasks(id),  -- for micro-steps
+  step_order INTEGER,                 -- order within a split parent task
+  xp_earned INTEGER,
   created_at TIMESTAMP DEFAULT NOW(),
   completed_at TIMESTAMP
 );
@@ -64,6 +67,9 @@ CREATE TABLE public.session_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES public.profiles(id),
   task_id UUID REFERENCES public.tasks(id),
+  task_title TEXT,
+  cognitive_load_score INTEGER,
+  xp_earned INTEGER,
   energy_level TEXT,
   energy_score INTEGER,
   was_rerouted BOOLEAN DEFAULT FALSE,
@@ -82,6 +88,31 @@ CREATE TABLE public.copilot_logs (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- SLEEP LOGS (SQDS proxy — daily sleep pulse for thesis metrics)
+CREATE TABLE public.sleep_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  hours_slept NUMERIC(4, 1) NOT NULL CHECK (hours_slept >= 0 AND hours_slept <= 24),
+  rested_score INTEGER NOT NULL CHECK (rested_score BETWEEN 1 AND 5),
+  logged_at TIMESTAMP DEFAULT NOW()
+);
+
+-- ROUTING LOGS (CLCS snapshots — reroute audit when energy changes)
+CREATE TABLE public.routing_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  task_id UUID REFERENCES public.tasks(id) ON DELETE SET NULL,
+  task_title TEXT,
+  cognitive_load_score INTEGER,
+  energy_score INTEGER,
+  energy_level TEXT,
+  effective_capacity INTEGER,
+  delta INTEGER,
+  was_rerouted BOOLEAN NOT NULL DEFAULT FALSE,
+  unlock_score INTEGER,
+  routed_at TIMESTAMP DEFAULT NOW()
+);
+
 -- USER INTEGRATIONS (ClickUp, Asana, Obsidian, Notes, AI Agents)
 CREATE TABLE public.user_integrations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -91,6 +122,8 @@ CREATE TABLE public.user_integrations (
   api_token TEXT,                  -- for ClickUp, Asana (store encrypted in production)
   context_notes TEXT,              -- for Obsidian, Notes, AI Agents (free-text context injected into AI)
   workspace_name TEXT,             -- optional workspace/space label
+  external_team_id TEXT,           -- ClickUp workspace (team) id after OAuth selection
+  account_label TEXT,              -- connected account email/username (ClickUp OAuth)
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(user_id, integration_type)
@@ -106,6 +139,8 @@ ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.energy_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.session_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.copilot_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sleep_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.routing_logs ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "Users see own data" ON public.profiles
   FOR ALL USING (auth.uid() = id);
@@ -123,6 +158,12 @@ CREATE POLICY "Users see own data" ON public.session_logs
   FOR ALL USING (auth.uid() = user_id);
 
 CREATE POLICY "Users see own data" ON public.copilot_logs
+  FOR ALL USING (auth.uid() = user_id);
+
+CREATE POLICY "Users see own data" ON public.sleep_logs
+  FOR ALL USING (auth.uid() = user_id);
+
+CREATE POLICY "Users see own data" ON public.routing_logs
   FOR ALL USING (auth.uid() = user_id);
 
 ALTER TABLE public.user_integrations ENABLE ROW LEVEL SECURITY;

@@ -100,7 +100,18 @@ def google_auth_callback(code: str, state: str, error: str = None):
             }
         ).execute()
 
-        # Return to onboarding — wizard will detect the param and jump to step 5
+        # Return to dashboard if onboarding is done; otherwise continue onboarding wizard
+        profile = (
+            supabase.table("profiles")
+            .select("onboarding_completed")
+            .eq("id", state)
+            .single()
+            .execute()
+            .data
+        )
+        if profile and profile.get("onboarding_completed"):
+            return RedirectResponse(f"{FRONTEND_URL}/dashboard?calendar=connected")
+
         return RedirectResponse(f"{FRONTEND_URL}/onboarding?calendar=connected")
 
     except Exception as e:

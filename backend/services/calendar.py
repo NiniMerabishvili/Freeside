@@ -35,9 +35,13 @@ def get_today_events(refresh_token: str) -> list:
 
     service = build("calendar", "v3", credentials=creds)
 
+    # Use a ±14h window around now rather than UTC midnight–midnight.
+    # This captures "today" correctly for any timezone (GMT-12 to GMT+14)
+    # without needing to know the user's local timezone.
+    from datetime import timedelta
     now = datetime.now(timezone.utc)
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+    start_of_day = (now - timedelta(hours=14)).isoformat()
+    end_of_day   = (now + timedelta(hours=14)).isoformat()
 
     try:
         events_result = (
@@ -60,9 +64,14 @@ def get_today_events(refresh_token: str) -> list:
 def summarize_events(events: list) -> dict:
     """
     Turn raw Google Calendar events into structured signals for the AI.
-    Handles both timed events (dateTime) and all-day events (date).
+
+    All-day events (holidays, travel, birthdays) are separated from timed
+    meetings because they do NOT consume focused-work time. Only timed events
+    contribute to meeting_count and total_meeting_minutes — the two signals
+    the AI uses to estimate cognitive load.
     """
-    summaries = []
+    timed_summaries: list[str] = []
+    all_day_titles: list[str] = []
     back_to_back_count = 0
     total_meeting_minutes = 0
     prev_end_dt: datetime | None = None
@@ -72,15 +81,16 @@ def summarize_events(events: list) -> dict:
         start_info = event.get("start", {})
         end_info = event.get("end", {})
 
-        # All-day event — has 'date' but no 'dateTime'
-        if "date" in start_info and "dateTime" not in start_info:
-            summaries.append(f"- {title} (all day)")
-            prev_end_dt = None  # can't track gaps for all-day events
+        # All-day event — 'date' key only, no 'dateTime'
+        # These are holidays, birthdays, travel markers, OOO blocks etc.
+        # They are NOT meetings and do NOT drain focused-work energy directly.
+        if "dateTime" not in start_info:
+            all_day_titles.append(title)
+            prev_end_dt = None
             continue
 
         start_str = start_info.get("dateTime", "")
         end_str = end_info.get("dateTime", "")
-
         if not start_str or not end_str:
             continue
 
@@ -88,23 +98,30 @@ def summarize_events(events: list) -> dict:
         end_dt = datetime.fromisoformat(end_str)
         duration = max(0, int((end_dt - start_dt).total_seconds() / 60))
         total_meeting_minutes += duration
-        summaries.append(f"- {title} ({duration} min)")
+        timed_summaries.append(f"- {title} ({duration} min)")
 
-        # Check back-to-back (< 15 min gap from previous timed event)
         if prev_end_dt is not None:
-            # Normalize timezone for comparison
             if start_dt.tzinfo and prev_end_dt.tzinfo:
                 gap = (start_dt - prev_end_dt).total_seconds() / 60
-            else:
-                gap = 999  # can't compare, skip
-            if gap < 15:
-                back_to_back_count += 1
+                if gap < 15:
+                    back_to_back_count += 1
 
         prev_end_dt = end_dt
 
+    # Build the event list shown to the AI
+    event_lines: list[str] = []
+    if timed_summaries:
+        event_lines += timed_summaries
+    if all_day_titles:
+        # Show all-day items as low-weight context, not meetings
+        joined = ", ".join(all_day_titles)
+        event_lines.append(f"- All-day context (not meetings): {joined}")
+
     return {
-        "event_count": len(events),
+        # Only count timed meetings — this is the cognitive load signal
+        "event_count": len(timed_summaries),
+        "all_day_event_count": len(all_day_titles),
         "total_meeting_minutes": total_meeting_minutes,
         "back_to_back_count": back_to_back_count,
-        "event_list": "\n".join(summaries) if summaries else "No events today",
+        "event_list": "\n".join(event_lines) if event_lines else "No meetings today",
     }

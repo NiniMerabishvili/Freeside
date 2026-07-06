@@ -1,0 +1,13 @@
+user_id,tcr_percentage,total_created,total_completed,reroute_percentage,total_interactions,reroute_count,avg_hours_slept,avg_rested_score,sleep_logs_count,avg_initiation_delay_minutes,tasks_evaluated,tasks_never_viewed,total_breakdowns_requested,overall_avg_energy,consecutive_decline_days,burnout_flag
+44c71e30-8667-4207-a8fd-300ad5129dd4,48.72,39,19,5.26,19,1,6.41,4.1,10,5009.57,39,18,17,5.964,1,False
+ee8f6469-6f16-4568-939e-a9dc38e8ea54,66.67,3,2,0.0,2,0,,,0,3480.54,3,1,2,6.0,0,False
+c9b4754e-9555-43a6-b408-8a4b0320e393,65.38,26,17,5.88,17,1,7.34,4.19,16,8297.29,26,9,10,6.158,1,False
+c8a2e4ab-0b57-414d-8939-3baeb8ae185c,45.45,11,5,0.0,5,0,,,0,1853.17,11,6,2,4.667,0,False
+27ad7a6d-820b-4a69-8cf7-4b5ea8ac2b65,73.33,30,22,4.55,22,1,7.26,4.19,16,5711.31,30,8,8,8.143,2,False
+32874034-9b8e-4574-8a86-263a2f7e4c46,68.18,22,15,26.67,15,4,6.48,3.0,14,6316.19,22,7,10,5.1,0,False
+ebe75908-3100-4ee5-a9b9-a7e54fede220,77.27,22,17,23.53,17,4,7.42,3.0,14,5230.14,22,5,8,8.412,0,False
+6c02df77-0779-40bf-86d0-ff24a970fa51,79.17,24,19,26.32,19,5,6.41,3.13,15,5350.83,24,5,7,6.35,0,False
+b700551a-4fe2-4561-8b22-0275c36cc517,75.0,24,18,5.56,18,1,7.45,3.18,17,4123.41,24,6,8,6.381,0,False
+2eac9cff-c391-4587-bb70-f642f11058a4,73.08,26,19,10.53,19,2,6.36,3.2,15,6402.4,26,7,10,5.211,0,False
+b4ce7eca-2597-4ff2-a688-985f911d27d2,80.0,30,24,8.33,24,2,7.28,4.12,16,4832.11,30,6,8,7.25,0,False
+479ed725-b3e5-4fba-8178-996d9b917ef0,78.26,23,18,0.0,18,0,7.64,4.09,11,5529.67,23,5,9,7.471,0,False

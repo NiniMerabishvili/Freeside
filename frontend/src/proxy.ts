@@ -1,6 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
+import { createFetchWithTimeout } from '@/lib/fetch-with-timeout'
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request })
@@ -9,6 +10,7 @@ export async function proxy(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      global: { fetch: createFetchWithTimeout(5000) },
       cookies: {
         getAll() {
           return request.cookies.getAll()
@@ -24,8 +26,14 @@ export async function proxy(request: NextRequest) {
     }
   )
 
-  // Refresh session — required for SSR auth
-  const { data: { user } } = await supabase.auth.getUser()
+  // Refresh session — required for SSR auth. Fail open if Supabase is unreachable.
+  let user = null
+  try {
+    const { data } = await supabase.auth.getUser()
+    user = data.user
+  } catch {
+    // Network timeout — treat as logged out so pages still load.
+  }
 
   const { pathname } = request.nextUrl
 

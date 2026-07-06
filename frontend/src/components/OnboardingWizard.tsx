@@ -29,6 +29,7 @@ import {
   CheckSquare,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import ClickUpWorkspacePicker from '@/components/ClickUpWorkspacePicker'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -641,7 +642,7 @@ const INTEGRATION_DEFS: {
   tagline: string
   icon: React.ElementType
   color: string
-  inputType: 'token' | 'text'
+  inputType: 'token' | 'text' | 'oauth'
   tokenLabel?: string
   tokenPlaceholder?: string
   notesLabel?: string
@@ -650,14 +651,10 @@ const INTEGRATION_DEFS: {
   {
     type: 'clickup',
     label: 'ClickUp',
-    tagline: 'Pull your tasks & projects. AI sees your real workload.',
+    tagline: 'Sign in with ClickUp, then pick a workspace — AI sees your real workload.',
     icon: ListTodo,
     color: '#7B68EE',
-    inputType: 'token',
-    tokenLabel: 'Personal API Token',
-    tokenPlaceholder: 'pk_xxxxxxxxxxxxxxxx',
-    notesLabel: 'Workspace / Space name (optional)',
-    notesPlaceholder: 'e.g. My Startup Workspace',
+    inputType: 'oauth',
   },
   {
     type: 'asana',
@@ -707,10 +704,16 @@ function IntegrationCard({
   def,
   integration,
   onChange,
+  onOAuthConnect,
+  oauthLoading,
+  onOAuthDisconnect,
 }: {
   def: typeof INTEGRATION_DEFS[0]
   integration: Integration
   onChange: (updated: Integration) => void
+  onOAuthConnect?: () => void
+  oauthLoading?: boolean
+  onOAuthDisconnect?: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const Icon = def.icon
@@ -764,12 +767,27 @@ function IntegrationCard({
               </span>
               <button
                 type="button"
-                onClick={handleDisconnect}
+                onClick={() => {
+                  if (def.inputType === 'oauth' && onOAuthDisconnect) {
+                    onOAuthDisconnect()
+                  } else {
+                    handleDisconnect()
+                  }
+                }}
                 className="rounded-full border border-[#dfe2e8] px-3 py-1.5 text-xs font-semibold text-[#6b7080] hover:border-red-300 hover:text-red-600 transition"
               >
                 Remove
               </button>
             </div>
+          ) : def.inputType === 'oauth' ? (
+            <button
+              type="button"
+              onClick={onOAuthConnect}
+              disabled={oauthLoading}
+              className="flex items-center gap-1.5 rounded-full border border-[#4648d4] px-4 py-1.5 text-xs font-bold text-[#4648d4] hover:bg-[#ededfc] transition disabled:opacity-50"
+            >
+              {oauthLoading ? 'Redirecting…' : 'Connect ClickUp →'}
+            </button>
           ) : (
             <button
               type="button"
@@ -843,6 +861,14 @@ function Step5({
   saving,
   error,
   calendarBanner,
+  clickupBanner,
+  userId,
+  showClickUpWorkspacePicker,
+  onClickUpWorkspaceComplete,
+  onDismissClickUpPicker,
+  onConnectClickUp,
+  clickupConnecting,
+  onDisconnectClickUp,
 }: {
   integrations: Integration[]
   setIntegrations: (list: Integration[]) => void
@@ -850,6 +876,14 @@ function Step5({
   saving: boolean
   error: string
   calendarBanner: 'connected' | 'denied' | 'error' | null
+  clickupBanner: 'select_workspace' | 'denied' | 'error' | null
+  userId: string | null
+  showClickUpWorkspacePicker: boolean
+  onClickUpWorkspaceComplete: (workspace: string) => void
+  onDismissClickUpPicker: () => void
+  onConnectClickUp: () => void
+  clickupConnecting: boolean
+  onDisconnectClickUp: () => void
 }) {
   const connectedCount = integrations.filter((i) => i.connected).length
 
@@ -888,6 +922,28 @@ function Step5({
           Calendar wasn&apos;t connected — you can try again later in Settings. You can still use Freeside manually.
         </div>
       )}
+      {clickupBanner === 'denied' && (
+        <div className="mb-5 flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          ClickUp connection was cancelled — you can try again or skip for now.
+        </div>
+      )}
+      {clickupBanner === 'error' && (
+        <div className="mb-5 flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          ClickUp connection failed — try again or connect later in Settings.
+        </div>
+      )}
+
+      {showClickUpWorkspacePicker && userId && (
+        <div className="mb-6">
+          <ClickUpWorkspacePicker
+            userId={userId}
+            onComplete={(result) => onClickUpWorkspaceComplete(result.workspace)}
+            onCancel={onDismissClickUpPicker}
+          />
+        </div>
+      )}
 
       <div className="mb-6 space-y-3">
         {INTEGRATION_DEFS.map((def) => {
@@ -898,6 +954,9 @@ function Step5({
               def={def}
               integration={integration}
               onChange={(updated) => updateIntegration(def.type, updated)}
+              onOAuthConnect={def.type === 'clickup' ? onConnectClickUp : undefined}
+              oauthLoading={def.type === 'clickup' ? clickupConnecting : false}
+              onOAuthDisconnect={def.type === 'clickup' ? onDisconnectClickUp : undefined}
             />
           )
         })}
@@ -949,6 +1008,10 @@ function OnboardingWizardInner() {
   const [error, setError] = useState('')
   const [calendarLoading, setCalendarLoading] = useState(false)
   const [calendarBanner, setCalendarBanner] = useState<'connected' | 'denied' | 'error' | null>(null)
+  const [clickupConnecting, setClickupConnecting] = useState(false)
+  const [clickupBanner, setClickupBanner] = useState<'select_workspace' | 'denied' | 'error' | null>(null)
+  const [showClickUpWorkspacePicker, setShowClickUpWorkspacePicker] = useState(false)
+  const [userId, setUserId] = useState<string | null>(null)
 
   // After Google OAuth redirect, detect the ?calendar= param and jump to step 5
   useEffect(() => {
@@ -963,6 +1026,55 @@ function OnboardingWizardInner() {
       setStep(4)
     }
   }, [searchParams])
+
+  // After ClickUp OAuth redirect
+  useEffect(() => {
+    const clickupParam = searchParams.get('clickup')
+    if (clickupParam === 'select_workspace') {
+      setClickupBanner('select_workspace')
+      setShowClickUpWorkspacePicker(true)
+      setDirection(1)
+      setStep(4)
+    } else if (clickupParam === 'denied') {
+      setClickupBanner('denied')
+      setDirection(1)
+      setStep(4)
+    } else if (clickupParam === 'error') {
+      setClickupBanner('error')
+      setDirection(1)
+      setStep(4)
+    }
+  }, [searchParams])
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id ?? null))
+  }, [])
+
+  const syncClickUpIntegrationState = async (uid: string) => {
+    const api = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+    try {
+      const res = await fetch(`${api}/integrations/status?user_id=${uid}`)
+      const data = await res.json()
+      const cu = data.clickup ?? {}
+      if (cu.connected) {
+        setIntegrations((prev) =>
+          prev.map((i) =>
+            i.type === 'clickup'
+              ? { ...i, connected: true, workspaceName: cu.workspace_name ?? '' }
+              : i
+          )
+        )
+      } else if (cu.needs_workspace) {
+        setShowClickUpWorkspacePicker(true)
+      }
+    } catch {
+      // ignore — user can connect manually
+    }
+  }
+
+  useEffect(() => {
+    if (step === 4 && userId) void syncClickUpIntegrationState(userId)
+  }, [step, userId])
 
   const [profile, setProfile] = useState<ProfileData>({
     name: '',
@@ -1085,6 +1197,52 @@ function OnboardingWizardInner() {
     go(4)
   }
 
+  const connectClickUp = async () => {
+    if (!userId) return
+    setClickupConnecting(true)
+    setError('')
+    try {
+      const api = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+      const res = await fetch(`${api}/integrations/clickup/auth/url?user_id=${userId}&return_to=onboarding`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail ?? `Server error ${res.status}`)
+      if (!data.auth_url) throw new Error('No auth URL returned from server.')
+      window.location.href = data.auth_url
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Could not connect ClickUp. Try again or skip.')
+      setClickupConnecting(false)
+    }
+  }
+
+  const disconnectClickUp = async () => {
+    if (!userId) return
+    try {
+      const api = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+      await fetch(`${api}/integrations/clickup/disconnect?user_id=${userId}`, { method: 'DELETE' })
+      setIntegrations((prev) =>
+        prev.map((i) =>
+          i.type === 'clickup'
+            ? { ...i, connected: false, apiToken: '', workspaceName: '' }
+            : i
+        )
+      )
+      setShowClickUpWorkspacePicker(false)
+    } catch {
+      setError('Could not disconnect ClickUp.')
+    }
+  }
+
+  const onClickUpWorkspaceComplete = (workspace: string) => {
+    setShowClickUpWorkspacePicker(false)
+    setClickupBanner(null)
+    setIntegrations((prev) =>
+      prev.map((i) =>
+        i.type === 'clickup' ? { ...i, connected: true, workspaceName: workspace } : i
+      )
+    )
+    router.replace('/onboarding')
+  }
+
   // ── Save step 5 → integrations + complete onboarding ─────────────
   const saveStep5 = async () => {
     setSaving(true)
@@ -1093,7 +1251,7 @@ function OnboardingWizardInner() {
       const user = await getUser()
       if (!user) throw new Error('Not logged in')
 
-      const connected = integrations.filter((i) => i.connected)
+      const connected = integrations.filter((i) => i.connected && i.type !== 'clickup')
       if (connected.length > 0) {
         const { error: intErr } = await supabase.from('user_integrations').upsert(
           connected.map((i) => ({
@@ -1191,6 +1349,17 @@ function OnboardingWizardInner() {
                   saving={saving}
                   error={error}
                   calendarBanner={calendarBanner}
+                  clickupBanner={clickupBanner}
+                  userId={userId}
+                  showClickUpWorkspacePicker={showClickUpWorkspacePicker}
+                  onClickUpWorkspaceComplete={onClickUpWorkspaceComplete}
+                  onDismissClickUpPicker={() => {
+                    setShowClickUpWorkspacePicker(false)
+                    router.replace('/onboarding')
+                  }}
+                  onConnectClickUp={connectClickUp}
+                  clickupConnecting={clickupConnecting}
+                  onDisconnectClickUp={() => void disconnectClickUp()}
                 />
               )}
             </motion.div>

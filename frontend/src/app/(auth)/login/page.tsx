@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, Suspense } from 'react'
+import { useState, useRef, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Eye, EyeOff, AlertCircle, ArrowRight } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { isNetworkError } from '@/lib/fetch-with-timeout'
 
 function LoginForm() {
   const router = useRouter()
@@ -17,13 +18,24 @@ function LoginForm() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  const emailRef = useRef<HTMLInputElement>(null)
+  const passwordRef = useRef<HTMLInputElement>(null)
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
     setLoading(true)
 
+    // Browser autofill sets the DOM value but may not trigger onChange,
+    // leaving React state empty. Read the ref value as a fallback.
+    const resolvedEmail = email || emailRef.current?.value || ''
+    const resolvedPassword = password || passwordRef.current?.value || ''
+
     try {
-      const { error: authErr } = await supabase.auth.signInWithPassword({ email, password })
+      const { error: authErr } = await supabase.auth.signInWithPassword({
+        email: resolvedEmail,
+        password: resolvedPassword,
+      })
       if (authErr) throw authErr
 
       // Check onboarding status
@@ -42,11 +54,17 @@ function LoginForm() {
         }
       }
     } catch (e: unknown) {
-      setError(
-        e instanceof Error
-          ? e.message.replace('Invalid login credentials', 'Incorrect email or password.')
-          : 'Login failed. Please try again.'
-      )
+      if (isNetworkError(e)) {
+        setError(
+          'Cannot reach the authentication server. Check your internet connection, disable VPN if active, and try again.'
+        )
+      } else {
+        setError(
+          e instanceof Error
+            ? e.message.replace('Invalid login credentials', 'Incorrect email or password.')
+            : 'Login failed. Please try again.'
+        )
+      }
     } finally {
       setLoading(false)
     }
@@ -66,6 +84,7 @@ function LoginForm() {
           Email
         </label>
         <input
+          ref={emailRef}
           id="email"
           type="email"
           required
@@ -89,6 +108,7 @@ function LoginForm() {
         </div>
         <div className="relative">
           <input
+            ref={passwordRef}
             id="password"
             type={showPassword ? 'text' : 'password'}
             required
@@ -112,7 +132,7 @@ function LoginForm() {
 
       <button
         type="submit"
-        disabled={loading || !email || !password}
+        disabled={loading}
         className="flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-[#4648d4] text-base font-bold text-white shadow-lg transition hover:bg-[#3a3cc0] disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {loading ? 'Signing in…' : <>Sign in <ArrowRight className="h-4 w-4" /></>}
