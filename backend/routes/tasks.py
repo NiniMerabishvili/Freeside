@@ -17,7 +17,7 @@ from services.xp import task_xp, sync_profile_xp
 from services.db_compat import update_task_completed
 from services.routing_log import log_routing_snapshot
 from services.task_split import route_with_splits, maybe_complete_parent, parent_progress_percent
-from services.day_context import get_day_plan_focus, sync_user_clickup_tasks
+from services.day_context import get_day_plan_focus, sync_user_clickup_tasks, probe_calendar_health
 from services.goal_planning import (
     assign_milestones_to_days,
     forecast_energy_landscape,
@@ -234,14 +234,19 @@ def get_routed_tasks(
 
     using_override = energy_score is not None
 
-    # Import live ClickUp tasks into the pool so they show up in the Tasks
-    # section without waiting for the energy check-in / plan-day. Skipped on
-    # slider previews (using_override) to avoid hammering the ClickUp API.
+    sync_warnings: list[dict] = []
+
+    # Import live ClickUp tasks + surface integration health (Phase 0).
     if not using_override:
         try:
-            sync_user_clickup_tasks(supabase, user_id)
+            _, cu_warnings = sync_user_clickup_tasks(supabase, user_id)
+            sync_warnings.extend(w.to_dict() for w in cu_warnings)
         except Exception:
             pass
+        if profile.get("google_calendar_connected") and profile.get("google_refresh_token"):
+            cal_warn = probe_calendar_health(profile.get("google_refresh_token"))
+            if cal_warn:
+                sync_warnings.append(cal_warn.to_dict())
     if using_override:
         energy_score = max(1, min(10, energy_score))
         energy_level = energy_level or _score_to_level(energy_score)
@@ -269,6 +274,7 @@ def get_routed_tasks(
                 "tasks": tasks.data,
                 "active_count": 0,
                 "rerouted_count": 0,
+                "sync_warnings": sync_warnings,
             }
 
         energy       = energy_log.data[0]
@@ -367,6 +373,7 @@ def get_routed_tasks(
         "parent_groups":       result.get("parent_groups", []),
         "milestone_groups":    milestone_groups,
         "daily_schedule":      daily_schedule,
+        "sync_warnings":       sync_warnings,
     }
 
 

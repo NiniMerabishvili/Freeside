@@ -18,18 +18,16 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 
 from prompts.freeside_copilot import FREESIDE_COPILOT_SYSTEM_PROMPT
 from services.context_builder import build_context_for_user, build_freeside_context
+from services import model_router
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
-_MODEL = "gemini-2.5-flash"
+_MODEL = "gemini-2.5-flash"  # kept for reference; routing uses model_router.TASK_MODELS
 
 
 def _is_quota_error(exc: Exception) -> bool:
@@ -55,18 +53,6 @@ def _language_directive(language: str | None) -> str:
     )
 
 
-def _history_to_contents(conversation_history: list[dict]) -> list[types.Content]:
-    """Convert [{role, content}] history into Gemini Content turns."""
-    contents: list[types.Content] = []
-    for turn in conversation_history or []:
-        role = "model" if turn.get("role") == "assistant" else "user"
-        text = str(turn.get("content", ""))
-        if not text:
-            continue
-        contents.append(types.Content(role=role, parts=[types.Part(text=text)]))
-    return contents
-
-
 def _generate(
     freeside_context: str,
     user_message: str,
@@ -74,23 +60,25 @@ def _generate(
     *,
     language: str | None = None,
 ) -> str:
-    """Single Gemini call with system prompt + injected context + history."""
-    contents = _history_to_contents(conversation_history)
-    # Context injection: a leading user turn carrying the live XML block.
-    contents.append(types.Content(role="user", parts=[types.Part(text=freeside_context)]))
-    contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
-
-    response = _client.models.generate_content(
-        model=_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=FREESIDE_COPILOT_SYSTEM_PROMPT + _language_directive(language),
-            max_output_tokens=1000,
-            temperature=0.7,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
+    """Single model call with system prompt + injected context + history."""
+    # Flatten history + context + user message into one prompt for the router.
+    # (Gemini multi-turn via router is a Phase 1 follow-up; this preserves behaviour.)
+    history_block = ""
+    for turn in conversation_history or []:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        text = str(turn.get("content", "")).strip()
+        if text:
+            history_block += f"{role}: {text}\n"
+    combined = (
+        f"{history_block}\n"
+        f"{freeside_context}\n\n"
+        f"User message: {user_message}"
     )
-    return (response.text or "").strip()
+    return model_router.generate_text(
+        "copilot_chat",
+        contents=combined,
+        system_instruction=FREESIDE_COPILOT_SYSTEM_PROMPT + _language_directive(language),
+    )
 
 
 def chat_with_copilot(

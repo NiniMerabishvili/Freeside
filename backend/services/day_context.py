@@ -4,6 +4,13 @@ from __future__ import annotations
 from services.calendar import get_today_events, summarize_events
 from services.clickup import get_clickup_context_from_db, fetch_clickup_summary, format_clickup_block
 from services.copilot_history import fetch_recent_copilot_conversation
+from services.integration_errors import (
+    SyncWarning,
+    SyncErrorCode,
+    SYNC_ERROR_MESSAGES,
+    clickup_warning_from_exception,
+    calendar_warning_from_exception,
+)
 
 
 def _load_clickup_row(db, user_id: str) -> dict | None:
@@ -123,24 +130,43 @@ def _estimate_clickup_load(task: dict, energy_score: int) -> int:
     return max(1, min(10, base))
 
 
-def sync_user_clickup_tasks(db, user_id: str) -> int:
+def probe_calendar_health(refresh_token: str | None) -> SyncWarning | None:
+    """Return a user-facing warning if calendar fetch fails, else None."""
+    if not refresh_token:
+        return None
+    try:
+        get_today_events(refresh_token)
+        return None
+    except Exception as exc:
+        return calendar_warning_from_exception(exc)
+
+
+def sync_user_clickup_tasks(db, user_id: str) -> tuple[int, list[SyncWarning]]:
     """
     Fetch the user's live ClickUp tasks and import any new ones into the Freeside
-    task pool. Safe to call on every dashboard load — dedupes by title and never
-    raises. Returns the number of newly inserted tasks.
+    task pool. Returns (inserted_count, warnings). Never raises.
     """
+    warnings: list[SyncWarning] = []
     row = _load_clickup_row(db, user_id)
-    if not row or not row.get("api_token") or not row.get("external_team_id"):
-        return 0
+    if not row or not row.get("api_token"):
+        return 0, warnings
+    if not row.get("external_team_id") and not row.get("workspace_name"):
+        warnings.append(SyncWarning(
+            SyncErrorCode.CLICKUP_NO_WORKSPACE,
+            SYNC_ERROR_MESSAGES[SyncErrorCode.CLICKUP_NO_WORKSPACE],
+            "clickup",
+        ))
+        return 0, warnings
     try:
         summary = fetch_clickup_summary(
             row["api_token"],
             row.get("workspace_name"),
             team_id=row.get("external_team_id"),
         )
-    except Exception:
-        return 0
-    return sync_clickup_tasks_to_db(db, user_id, summary)
+    except Exception as exc:
+        warnings.append(clickup_warning_from_exception(exc))
+        return 0, warnings
+    return sync_clickup_tasks_to_db(db, user_id, summary), warnings
 
 
 def sync_clickup_tasks_to_db(db, user_id: str, clickup_summary: dict | None) -> int:

@@ -10,6 +10,8 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
+from services import model_router
+
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
@@ -284,17 +286,7 @@ IMPORTANT RULES FOR SCORING:
 Respond ONLY with this exact JSON — no explanation, no markdown fences:
 {{"suggested_score": <integer 1-10>, "suggested_level": "<high|balanced|low>", "reasoning": "<one sentence, max 20 words, conversational tone>"}}"""
 
-    response = _client.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=300,
-            temperature=0.4,
-            # Disable thinking for structured JSON inference — saves tokens
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    return _extract_json(response.text)
+    return model_router.generate_json("energy_inference", contents=prompt)
 
 
 def infer_energy_from_day_context(day_context: dict, user_profile: dict) -> dict:
@@ -341,16 +333,7 @@ SCORING RULES (combine ALL sources):
 Respond ONLY with this exact JSON — no markdown fences:
 {{"suggested_score": <integer 1-10>, "suggested_level": "<high|balanced|low>", "reasoning": "<one sentence max 25 words mentioning calendar and/or ClickUp if relevant>"}}"""
 
-    response = _client.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=300,
-            temperature=0.4,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    return _extract_json(response.text)
+    return model_router.generate_json("energy_inference", contents=prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -571,17 +554,9 @@ Respond ONLY with a JSON array — no markdown, no explanation:
 [{{"title": "<verb-first milestone, max 14 words>", "cognitive_load_score": <int 5-9>, "estimated_minutes": <int 60-180>, "reasoning": "<definition of done, max 12 words>"}}]"""
 
     try:
-        response = _client.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=900,
-                temperature=0.4,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        raw = model_router.generate_json_array("goal_decompose", contents=prompt)
         milestones = normalize_task_specs(
-            _extract_json_array(response.text),
+            raw,
             default_load=6,
             default_minutes=90,
             max_items=6,
@@ -635,17 +610,9 @@ Respond ONLY with a JSON array — no markdown:
 [{{"title": "<verb-first task, max 12 words>", "cognitive_load_score": <int 1-10>, "estimated_minutes": <int 15-60>}}]"""
 
     try:
-        response = _client.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=700,
-                temperature=0.4,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        raw = model_router.generate_json_array("goal_decompose", contents=prompt)
         tasks = normalize_task_specs(
-            _extract_json_array(response.text),
+            raw,
             default_load=max(1, min(10, cognitive_load_score)),
             default_minutes=max(15, min(60, estimated_minutes // 3 or 30)),
             max_items=5,
@@ -689,16 +656,7 @@ Rules:
 Respond ONLY with a JSON array — no markdown, no explanation:
 [{{"title": "<task title, max 10 words>", "cognitive_load_score": <int 1-10>}}]"""
 
-    response = _client.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=600,
-            temperature=0.3,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    return _extract_json_array(response.text)
+    return model_router.generate_json_array("brain_dump_parse", contents=prompt)
 
 
 def break_down_task(
@@ -742,16 +700,7 @@ Rules:
 Respond ONLY with a JSON array:
 [{{"text": "<step>"}}]"""
 
-    response = _client.models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=400,
-            temperature=0.4,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    raw = _extract_json_array(response.text)
+    raw = model_router.generate_json_array("micro_step", contents=prompt)
     steps = []
     for item in raw:
         if isinstance(item, dict):
@@ -795,16 +744,7 @@ Respond ONLY with a JSON array:
 [{{"title": "<subtask>", "cognitive_load_score": <int>, "step_order": <int>}}]"""
 
     try:
-        response = _client.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=500,
-                temperature=0.4,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
-        raw = _extract_json_array(response.text)
+        raw = model_router.generate_json_array("task_split", contents=prompt)
     except Exception:
         raw = []
 
@@ -871,17 +811,12 @@ Rules for suggested_milestones:
 """
 
     try:
-        response = _client.models.generate_content(
-            model=_MODEL,
+        text = model_router.generate_text(
+            "copilot_chat",
             contents=user_message,
-            config=types.GenerateContentConfig(
-                system_instruction=system_context + format_rules,
-                max_output_tokens=900,
-                temperature=0.7,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
+            system_instruction=system_context + format_rules,
         )
-        data = _extract_json(response.text)
+        data = _extract_json(text)
         milestones = normalize_copilot_milestones(data)
         flat_tasks = []
         for m in milestones:

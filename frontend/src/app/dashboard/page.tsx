@@ -10,6 +10,7 @@ import EnergyPanel from '@/components/EnergyPanel'
 import SleepPanel from '@/components/SleepPanel'
 import CoPilot, { type CopilotSuggestedMilestone } from '@/components/CoPilot'
 import SuggestedTasksPanel, { type SuggestedMilestone } from '@/components/SuggestedTasksPanel'
+import SyncWarningsBanner, { type SyncWarning } from '@/components/SyncWarningsBanner'
 import GoalsPanel from '@/components/GoalsPanel'
 import { supabase } from '@/lib/supabase'
 import { effectiveTaskXp, taskXp } from '@/lib/xp'
@@ -957,6 +958,7 @@ export default function DashboardPage() {
     selected_count?: number
     deferred_count?: number
   } | null>(null)
+  const [syncWarnings, setSyncWarnings] = useState<SyncWarning[]>([])
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const fetchProfileStats = useCallback(async (uid: string) => {
@@ -1026,6 +1028,7 @@ export default function DashboardPage() {
         active_count:       data.active_count,
         rerouted_count:     data.rerouted_count,
       })
+      setSyncWarnings(Array.isArray(data.sync_warnings) ? data.sync_warnings : [])
       fetchCompletedTasks(uid)
     } catch {
       // silently fail
@@ -1313,6 +1316,8 @@ export default function DashboardPage() {
                   </button>
                 </div>
               </div>
+
+              <SyncWarningsBanner warnings={syncWarnings} />
 
               {planningDay && (
                 <div className="mb-4 flex items-center gap-2 rounded-lg border border-[#e0d9f7] bg-[#faf7ff] px-4 py-3 text-sm text-[#8127cf]">
