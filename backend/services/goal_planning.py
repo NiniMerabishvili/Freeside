@@ -197,13 +197,14 @@ def _insert_milestone_tasks(
     milestone_id: str,
     milestone_spec: dict,
     profile: dict,
+    goal_title: str | None = None,
 ) -> list[dict]:
     """Create child tasks under a milestone entity."""
     load = max(1, min(10, int(milestone_spec.get("cognitive_load_score") or 6)))
     est = int(milestone_spec.get("estimated_minutes") or 90)
     try:
         child_specs = decompose_milestone_tasks(
-            milestone_spec["title"], load, est, profile
+            milestone_spec["title"], load, est, profile, goal_title=goal_title
         )
     except Exception:
         child_specs = [{
@@ -243,6 +244,7 @@ def insert_scheduled_milestones(
     goal_id: str,
     milestones: list[dict],
     profile: dict | None,
+    goal_title: str | None = None,
 ) -> dict:
     """Create milestone entities + child tasks, scheduled across the forecast horizon."""
     profile = profile or {}
@@ -290,7 +292,9 @@ def insert_scheduled_milestones(
         milestone_id = milestone["id"]
         inserted_milestones.append({**milestone, "scheduled_date": m.get("scheduled_date")})
 
-        children = _insert_milestone_tasks(db, user_id, goal_id, milestone_id, m, profile)
+        children = _insert_milestone_tasks(
+            db, user_id, goal_id, milestone_id, m, profile, goal_title=goal_title
+        )
         inserted_tasks.extend(children)
 
     sync_goal_progress(db, goal_id)

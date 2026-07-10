@@ -37,39 +37,160 @@ def _is_quota_error(exc: Exception) -> bool:
     return "429" in s or "RESOURCE_EXHAUSTED" in s or "quota" in s.lower()
 
 
+# ---------------------------------------------------------------------------
+# Task-quality normalisation
+# ---------------------------------------------------------------------------
+
+# Vague verbs that signal a low-quality, non-actionable task title.
+_WEAK_STARTS = (
+    "work on", "work through", "do ", "handle", "deal with", "look at",
+    "think about", "figure out", "stuff", "things", "misc", "various",
+)
+
+
+def _title_quality_ok(title: str) -> bool:
+    """A usable title is specific, non-trivial, and not a vague catch-all."""
+    t = (title or "").strip()
+    if len(t) < 4 or len(t.split()) < 2:
+        return False
+    return not t.lower().startswith(_WEAK_STARTS)
+
+
+def _clean_title(title: str, max_words: int = 14) -> str:
+    """Trim, collapse whitespace, capitalise, and cap length of a task title."""
+    t = re.sub(r"\s+", " ", str(title or "").strip()).strip(" .")
+    if not t:
+        return t
+    words = t.split()
+    if len(words) > max_words:
+        t = " ".join(words[:max_words])
+    return t[0].upper() + t[1:]
+
+
+def _reconcile_load_and_minutes(load: int, minutes: int) -> tuple[int, int]:
+    """
+    Keep cognitive load and duration internally consistent.
+
+    Deep work (high load) cannot be a 10-minute task; trivial admin (low load)
+    should not be booked as a 3-hour block. Nudges outliers into a sane band.
+    """
+    load = max(1, min(10, int(load)))
+    minutes = max(10, min(240, int(minutes)))
+    if load >= 7 and minutes < 45:
+        minutes = 45
+    elif load <= 3 and minutes > 60:
+        minutes = 60
+    elif 4 <= load <= 6 and minutes > 120:
+        minutes = 120
+    return load, minutes
+
+
+def normalize_task_specs(
+    raw: list[dict],
+    *,
+    default_load: int = 5,
+    default_minutes: int = 45,
+    max_items: int | None = None,
+    keep_reasoning: bool = False,
+) -> list[dict]:
+    """
+    Clean, validate, and de-duplicate AI/fallback task specs.
+
+    - Drops vague or duplicate titles.
+    - Clamps and reconciles cognitive_load_score ↔ estimated_minutes.
+    - Preserves optional fields (reasoning) when requested.
+    """
+    seen: set[str] = set()
+    cleaned: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        title = _clean_title(item.get("title") or item.get("text") or "")
+        if not _title_quality_ok(title):
+            continue
+        key = title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            load = int(item.get("cognitive_load_score", default_load))
+        except (TypeError, ValueError):
+            load = default_load
+        try:
+            minutes = int(item.get("estimated_minutes", default_minutes))
+        except (TypeError, ValueError):
+            minutes = default_minutes
+        load, minutes = _reconcile_load_and_minutes(load, minutes)
+
+        spec: dict = {
+            "title": title,
+            "cognitive_load_score": load,
+            "estimated_minutes": minutes,
+        }
+        if keep_reasoning and item.get("reasoning"):
+            spec["reasoning"] = _clean_title(item["reasoning"], max_words=14)
+        cleaned.append(spec)
+
+    if max_items:
+        cleaned = cleaned[:max_items]
+    return cleaned
+
+
+def _profile_context_block(profile: dict) -> str:
+    """Shared profile snippet so decomposition reflects how the user actually works."""
+    parts = [f"- Role: {profile.get('role', 'professional')}"]
+    if profile.get("work_style"):
+        parts.append(f"- Work style: {profile['work_style']}")
+    if profile.get("peak_focus_time"):
+        parts.append(f"- Peak focus window: {profile['peak_focus_time']}")
+    if profile.get("daily_work_hours"):
+        parts.append(f"- Typical focused hours/day: {profile['daily_work_hours']}")
+    if profile.get("productive_day_description"):
+        parts.append(f"- Their idea of a productive day: {profile['productive_day_description']}")
+    return "\n".join(parts)
+
+
 def fallback_decompose_goal(goal_title: str) -> list[dict]:
-    """Rule-based milestones when Gemini is unavailable."""
-    short = goal_title[:55]
-    return [
+    """Rule-based milestones when Gemini is unavailable (still normalised downstream)."""
+    short = goal_title.strip().rstrip(".")[:60]
+    return normalize_task_specs([
         {
-            "title": f"Define scope and plan for {short}",
+            "title": f"Clarify scope and success criteria for {short}",
             "cognitive_load_score": 6,
-            "estimated_minutes": 90,
-            "reasoning": "Foundation milestone",
+            "estimated_minutes": 75,
+            "reasoning": "Define what done looks like before building",
         },
         {
-            "title": f"Build core deliverable: {short}",
+            "title": f"Research and outline the approach for {short}",
+            "cognitive_load_score": 6,
+            "estimated_minutes": 90,
+            "reasoning": "Reduce uncertainty and pick a direction",
+        },
+        {
+            "title": f"Build the core of {short}",
             "cognitive_load_score": 8,
-            "estimated_minutes": 120,
-            "reasoning": "Main execution",
+            "estimated_minutes": 150,
+            "reasoning": "The main deliverable that moves the goal",
         },
         {
-            "title": f"Review and refine {short}",
+            "title": f"Test, review, and refine {short}",
             "cognitive_load_score": 6,
             "estimated_minutes": 90,
-            "reasoning": "Polish and validate",
+            "reasoning": "Validate quality and close gaps",
         },
-    ]
+    ], default_load=6, default_minutes=90, keep_reasoning=True)
 
 
 def fallback_milestone_tasks(milestone_title: str, load: int, est: int) -> list[dict]:
-    """Rule-based child tasks when Gemini is unavailable."""
-    chunk = max(20, est // 3)
-    return [
-        {"title": f"Prepare and gather inputs for {milestone_title[:40]}", "cognitive_load_score": max(1, load - 2), "estimated_minutes": chunk},
-        {"title": f"Execute main work on {milestone_title[:40]}", "cognitive_load_score": load, "estimated_minutes": chunk},
-        {"title": f"Review and complete {milestone_title[:40]}", "cognitive_load_score": max(1, load - 1), "estimated_minutes": chunk},
-    ]
+    """Rule-based child tasks when Gemini is unavailable (still normalised downstream)."""
+    short = milestone_title.strip().rstrip(".")[:50]
+    chunk = max(20, min(60, est // 3))
+    return normalize_task_specs([
+        {"title": f"Gather inputs and set up for {short}", "cognitive_load_score": max(1, load - 2), "estimated_minutes": chunk},
+        {"title": f"Complete the main work of {short}", "cognitive_load_score": load, "estimated_minutes": chunk},
+        {"title": f"Review and wrap up {short}", "cognitive_load_score": max(1, load - 1), "estimated_minutes": chunk},
+    ], default_load=load, default_minutes=chunk)
 
 
 def normalize_copilot_milestones(data: dict) -> list[dict]:
@@ -422,26 +543,32 @@ def decompose_goal(goal_title: str, category: str, timeframe: str, profile: dict
 
     Returns: (milestones, used_fallback)
     """
-    prompt = f"""You are a productivity AI helping a user plan a meaningful goal — not a checkbox list.
+    prompt = f"""You are a productivity strategist helping a user plan a meaningful goal — not a checkbox list.
 
 GOAL: "{goal_title}"
 CATEGORY: {category}
 TIMEFRAME: {timeframe}
-USER ROLE: {profile.get('role', 'professional')}
 
-Decompose this goal into 4–6 MILESTONES — each representing real, focused work (roughly 60–180 minutes).
-Do NOT create trivial micro-tasks (no "send one email", "open a doc", "5-minute review").
-Each milestone should move the goal forward in a substantive way.
+USER CONTEXT:
+{_profile_context_block(profile)}
 
-Assign each milestone:
-- cognitive_load_score (1–10): most milestones should be 5–9 (meaningful work, not admin crumbs)
-- estimated_minutes: realistic focused time (60–180)
-- reasoning: why this milestone matters (max 12 words)
+Decompose this goal into 4–6 MILESTONES — each a substantive chunk of focused work (roughly 60–180 minutes).
 
-Order milestones logically (foundation → execution → polish).
+QUALITY BAR (important):
+- Each title starts with a strong action verb and names a CONCRETE deliverable or outcome
+  (e.g. "Draft the landing-page copy and hero section", NOT "Work on marketing").
+- No trivial micro-tasks ("send one email", "open a doc", "5-minute review").
+- No vague filler ("work on", "handle", "think about", "misc").
+- Milestones must be distinct — no overlap or duplication.
+- Sequence them logically: foundation → research/design → execution → validation/polish.
+
+For each milestone assign:
+- cognitive_load_score (1–10): most should be 5–9 (real work, not admin crumbs). Heavier build/strategy work = higher.
+- estimated_minutes: realistic focused time (60–180), consistent with the load.
+- reasoning: the concrete outcome / definition of done (max 12 words).
 
 Respond ONLY with a JSON array — no markdown, no explanation:
-[{{"title": "<milestone title, max 14 words>", "cognitive_load_score": <int 5-9>, "estimated_minutes": <int 60-180>, "reasoning": "<why, max 12 words>"}}]"""
+[{{"title": "<verb-first milestone, max 14 words>", "cognitive_load_score": <int 5-9>, "estimated_minutes": <int 60-180>, "reasoning": "<definition of done, max 12 words>"}}]"""
 
     try:
         response = _client.models.generate_content(
@@ -453,7 +580,16 @@ Respond ONLY with a JSON array — no markdown, no explanation:
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
-        return _extract_json_array(response.text), False
+        milestones = normalize_task_specs(
+            _extract_json_array(response.text),
+            default_load=6,
+            default_minutes=90,
+            max_items=6,
+            keep_reasoning=True,
+        )
+        if len(milestones) < 2:
+            return fallback_decompose_goal(goal_title), True
+        return milestones, False
     except Exception as exc:
         if _is_quota_error(exc):
             return fallback_decompose_goal(goal_title), True
@@ -465,25 +601,38 @@ def decompose_milestone_tasks(
     cognitive_load_score: int,
     estimated_minutes: int,
     profile: dict,
+    goal_title: str | None = None,
 ) -> list[dict]:
     """
     Break a milestone into 3–5 actionable tasks that fit within the milestone scope.
 
     Returns: [{ title, cognitive_load_score, estimated_minutes }, ...]
     """
-    prompt = f"""You are a productivity AI breaking a milestone into concrete tasks for a task manager.
+    goal_line = f'PARENT GOAL: "{goal_title}"\n' if goal_title else ""
+    prompt = f"""You are a productivity strategist breaking a milestone into concrete, do-able tasks.
 
-MILESTONE: "{milestone_title}"
+{goal_line}MILESTONE: "{milestone_title}"
 MILESTONE LOAD: {cognitive_load_score}/10
 TOTAL TIME BUDGET: ~{estimated_minutes} minutes across all tasks
 
-Create 3–5 specific tasks that together complete this milestone.
-Each task should be completable in one focused session (15–60 minutes).
-Assign cognitive_load_score (1–10) and estimated_minutes per task.
-Sum of estimated_minutes should be roughly {estimated_minutes} (±20%).
+USER CONTEXT:
+{_profile_context_block(profile)}
+
+Create 3–5 tasks that, done in order, COMPLETE this milestone.
+
+QUALITY BAR (important):
+- Each title starts with an action verb and names a concrete step or artefact
+  (e.g. "Write the API endpoint for task routing", NOT "Work on backend").
+- Each task is finishable in ONE focused session (15–60 minutes).
+- Order tasks so each builds on the previous one.
+- No vague filler ("work on", "handle", "misc"), no duplicates, no trivial 5-minute busywork.
+- Lighter setup/review tasks get lower load; the core build step gets the highest load.
+
+Assign cognitive_load_score (1–10) and estimated_minutes (15–60) per task.
+The sum of estimated_minutes should be roughly {estimated_minutes} (±20%).
 
 Respond ONLY with a JSON array — no markdown:
-[{{"title": "<task, max 12 words>", "cognitive_load_score": <int 1-10>, "estimated_minutes": <int 15-60>}}]"""
+[{{"title": "<verb-first task, max 12 words>", "cognitive_load_score": <int 1-10>, "estimated_minutes": <int 15-60>}}]"""
 
     try:
         response = _client.models.generate_content(
@@ -495,7 +644,15 @@ Respond ONLY with a JSON array — no markdown:
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
-        return _extract_json_array(response.text)
+        tasks = normalize_task_specs(
+            _extract_json_array(response.text),
+            default_load=max(1, min(10, cognitive_load_score)),
+            default_minutes=max(15, min(60, estimated_minutes // 3 or 30)),
+            max_items=5,
+        )
+        if len(tasks) < 2:
+            return fallback_milestone_tasks(milestone_title, cognitive_load_score, estimated_minutes)
+        return tasks
     except Exception as exc:
         if _is_quota_error(exc):
             return fallback_milestone_tasks(milestone_title, cognitive_load_score, estimated_minutes)

@@ -170,6 +170,7 @@ def plan_goal_milestones(goal_id: str, request: GoalPlanRequest):
         goal_id,
         request.milestones,
         profile,
+        goal_title=goal_resp.data.get("title"),
     )
     return result
 
