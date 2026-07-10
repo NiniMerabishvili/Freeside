@@ -913,7 +913,7 @@ function RightRail({ userId, energyLevel, energyScore, triggerMessage, onTrigger
   onReportLowEnergy?: () => void
 }) {
   return (
-    <div className="hidden h-screen 2xl:flex 2xl:flex-col" style={{ minWidth: 320, maxWidth: 380 }}>
+    <div className="mx-5 mb-7 flex h-[min(720px,calc(100vh-2rem))] min-w-0 flex-col md:mx-10 xl:sticky xl:top-0 xl:mx-0 xl:mb-0 xl:h-screen xl:min-w-[320px] xl:max-w-[380px]">
       <CoPilot
         userId={userId}
         energyLevel={energyLevel}

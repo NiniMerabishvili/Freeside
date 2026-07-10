@@ -17,7 +17,7 @@ from services.xp import task_xp, sync_profile_xp
 from services.db_compat import update_task_completed
 from services.routing_log import log_routing_snapshot
 from services.task_split import route_with_splits, maybe_complete_parent, parent_progress_percent
-from services.day_context import get_day_plan_focus
+from services.day_context import get_day_plan_focus, sync_user_clickup_tasks
 from services.goal_planning import (
     assign_milestones_to_days,
     forecast_energy_landscape,
@@ -233,6 +233,15 @@ def get_routed_tasks(
     peak_focus_time = profile.get("peak_focus_time")
 
     using_override = energy_score is not None
+
+    # Import live ClickUp tasks into the pool so they show up in the Tasks
+    # section without waiting for the energy check-in / plan-day. Skipped on
+    # slider previews (using_override) to avoid hammering the ClickUp API.
+    if not using_override:
+        try:
+            sync_user_clickup_tasks(supabase, user_id)
+        except Exception:
+            pass
     if using_override:
         energy_score = max(1, min(10, energy_score))
         energy_level = energy_level or _score_to_level(energy_score)

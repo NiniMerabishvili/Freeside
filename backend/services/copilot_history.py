@@ -40,6 +40,35 @@ def fetch_recent_copilot_conversation(db: Client, user_id: str, limit: int = 12)
     return _fallback_summary(db, user_id, limit)
 
 
+def fetch_recent_copilot_turns(db: Client, user_id: str, limit: int = 6) -> list[dict]:
+    """
+    Return recent Co-Pilot exchanges as structured [{role, content}] turns for
+    the new context-injection chat (oldest first).
+    """
+    try:
+        resp = (
+            db.table("copilot_logs")
+            .select("user_message, assistant_reply, created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = list(reversed(resp.data or []))
+    except Exception:
+        return []
+
+    turns: list[dict] = []
+    for row in rows:
+        user_msg = (row.get("user_message") or "").strip()
+        assistant = (row.get("assistant_reply") or "").strip()
+        if user_msg:
+            turns.append({"role": "user", "content": user_msg[:2000]})
+        if assistant:
+            turns.append({"role": "assistant", "content": assistant[:2000]})
+    return turns
+
+
 def _fallback_summary(db: Client, user_id: str, limit: int) -> str:
     try:
         resp = (

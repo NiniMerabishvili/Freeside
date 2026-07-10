@@ -19,7 +19,19 @@ from services.day_context import (
     set_day_plan_focus,
 )
 
-from services.copilot_history import fetch_recent_copilot_conversation, log_copilot_exchange
+from services.copilot import reply_for_user
+from services.copilot_actions import (
+    extract_energy_profile,
+    extract_task_cards,
+    parse_copilot_actions,
+    strip_structured_blocks,
+    task_cards_to_suggestions,
+)
+from services.copilot_history import (
+    fetch_recent_copilot_conversation,
+    fetch_recent_copilot_turns,
+    log_copilot_exchange,
+)
 
 load_dotenv()
 
@@ -38,6 +50,7 @@ class ChatRequest(BaseModel):
     message_type: Optional[str] = None   # 'break_down' | 'proactive' | 'user_initiated'
     energy_score: Optional[int] = None
     energy_level: Optional[str] = None
+    language: Optional[str] = None       # BCP-47 hint from the browser (e.g. 'ka', 'en-US')
 
 
 class PlanDayRequest(BaseModel):
@@ -113,8 +126,12 @@ Name tasks clearly for my Freeside task list."""
 @router.post("/chat")
 def chat(request: ChatRequest):
     """
-    Context-aware AI co-pilot chat.
-    Builds context from user's energy, tasks, and goals before calling Gemini.
+    Context-aware Freeside Copilot chat (services/copilot.py).
+
+    Builds a live <freeside_context> block (profile + Google Calendar + ClickUp +
+    energy history + today's metrics), replies in the user's language, then parses
+    the structured blocks (<energy_profile>, <task_card>, reschedule/split lines)
+    out of the reply so the UI can render clean, human-readable language.
     """
     # Determine message type — used by PFI metric (breakdown frequency)
     if request.message_type:
@@ -126,23 +143,34 @@ def chat(request: ChatRequest):
     else:
         msg_type = "user_initiated"
 
+    energy_profile = None
+    task_cards: list = []
+    actions: list = []
+    suggested_tasks: list = []
+
     try:
-        context = build_copilot_context(
-            request.user_id,
+        history = fetch_recent_copilot_turns(supabase, request.user_id)
+        result = reply_for_user(
             supabase,
-            energy_score=request.energy_score,
-            energy_level=request.energy_level,
+            request.user_id,
+            request.message,
+            history,
+            language=request.language,
         )
-        result = chat_with_copilot(context, request.message)
-        reply   = result["reply"]
-        suggested_tasks = result.get("suggested_tasks", [])
-        suggested_milestones = result.get("suggested_milestones", [])
+        raw_reply = result["reply"]
         ai_fallback = result.get("ai_fallback", False)
+
+        if not ai_fallback:
+            energy_profile = extract_energy_profile(raw_reply)
+            task_cards = extract_task_cards(raw_reply)
+            actions = parse_copilot_actions(raw_reply)
+            suggested_tasks = task_cards_to_suggestions(task_cards)
+
+        # Strip machine-readable blocks so the bubble shows only natural language.
+        reply = strip_structured_blocks(raw_reply) or raw_reply
     except Exception as exc:
         err_str = str(exc)
         logger.warning("Copilot chat failed: %s", err_str[:200])
-        suggested_tasks = []
-        suggested_milestones = []
         ai_fallback = True
         if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
             reply = (
@@ -170,6 +198,9 @@ def chat(request: ChatRequest):
         "reply": reply,
         "message_type": msg_type,
         "suggested_tasks": suggested_tasks,
-        "suggested_milestones": suggested_milestones,
+        "suggested_milestones": [],
+        "energy_profile": energy_profile,
+        "task_cards": task_cards,
+        "actions": actions,
         "ai_fallback": ai_fallback,
     }

@@ -95,8 +95,14 @@ export default function AppShell({ active, children, rightRail }: AppShellProps)
 
       {/* Main content */}
       <div className="lg:pl-72">
-        <main className={rightRail ? "grid min-h-screen 2xl:grid-cols-[1fr_380px]" : "min-h-screen"}>
-          <section>{children}</section>
+        <main
+          className={
+            rightRail
+              ? "grid min-h-screen xl:grid-cols-[minmax(0,1fr)_minmax(320px,360px)] 2xl:grid-cols-[minmax(0,1fr)_380px]"
+              : "min-h-screen"
+          }
+        >
+          <section className="min-w-0">{children}</section>
           {rightRail}
         </main>
       </div>

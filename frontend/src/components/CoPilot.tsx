@@ -18,10 +18,39 @@ export type CopilotSuggestedMilestone = {
   tasks: CopilotSuggestedTask[]
 }
 
+type EnergyProfile = {
+  score?: string | number
+  level?: string
+  key_factors?: string
+  recommended_work_style?: string
+}
+
 type Message = {
   role: 'user' | 'assistant'
   text: string
   type?: string
+  energyProfile?: EnergyProfile | null
+}
+
+/**
+ * Defensive removal of any machine-readable blocks the model may emit, so the
+ * user only ever sees natural language (the backend already strips these, this
+ * is a safety net).
+ */
+function stripCopilotTags(text: string): string {
+  if (!text) return ''
+  return text
+    .replace(/<energy_profile>[\s\S]*?<\/energy_profile>/gi, '')
+    .replace(/<task_card>[\s\S]*?<\/task_card>/gi, '')
+    .replace(/<\/?freeside_context>/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+const ENERGY_STYLE: Record<string, { bg: string; color: string; label: string }> = {
+  HIGH:   { bg: '#e6f4ea', color: '#2d7a3a', label: 'High energy' },
+  MEDIUM: { bg: '#fdf3d0', color: '#7a5c00', label: 'Medium energy' },
+  LOW:    { bg: '#fdeaea', color: '#b22525', label: 'Low energy' },
 }
 
 type Props = {
@@ -86,10 +115,16 @@ export default function CoPilot({ userId, energyLevel, energyScore, triggerMessa
           message_type: type ?? 'user_initiated',
           energy_score: energyScore ?? null,
           energy_level: energyLevel || null,
+          language:     typeof navigator !== 'undefined' ? navigator.language : null,
         }),
       })
       const data = await res.json()
-      setMessages(prev => [...prev, { role: 'assistant', text: data.reply }])
+      const energyProfile = (data.energy_profile ?? null) as EnergyProfile | null
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        text: stripCopilotTags(data.reply ?? ''),
+        energyProfile,
+      }])
       const suggestedMilestones = (data.suggested_milestones ?? []) as CopilotSuggestedMilestone[]
       if (suggestedMilestones.length > 0) {
         onTasksSuggested?.(suggestedMilestones, data.ai_fallback)
@@ -186,6 +221,26 @@ export default function CoPilot({ userId, energyLevel, energyScore, triggerMessa
                   : 'rounded-tl-sm bg-[#f4f3ff] text-[#2d2d40]'
               }`}
             >
+              {msg.role === 'assistant' && msg.energyProfile?.level && (() => {
+                const style = ENERGY_STYLE[msg.energyProfile.level.toUpperCase()]
+                if (!style) return null
+                return (
+                  <div className="mb-2 flex flex-col gap-1">
+                    <span
+                      className="inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                      style={{ backgroundColor: style.bg, color: style.color }}
+                    >
+                      <Zap className="h-3 w-3" />
+                      {style.label}
+                    </span>
+                    {msg.energyProfile.recommended_work_style && (
+                      <span className="text-xs italic text-[#6b7080]">
+                        {msg.energyProfile.recommended_work_style}
+                      </span>
+                    )}
+                  </div>
+                )
+              })()}
               {msg.text}
             </div>
           </div>

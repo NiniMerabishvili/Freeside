@@ -123,6 +123,26 @@ def _estimate_clickup_load(task: dict, energy_score: int) -> int:
     return max(1, min(10, base))
 
 
+def sync_user_clickup_tasks(db, user_id: str) -> int:
+    """
+    Fetch the user's live ClickUp tasks and import any new ones into the Freeside
+    task pool. Safe to call on every dashboard load — dedupes by title and never
+    raises. Returns the number of newly inserted tasks.
+    """
+    row = _load_clickup_row(db, user_id)
+    if not row or not row.get("api_token") or not row.get("external_team_id"):
+        return 0
+    try:
+        summary = fetch_clickup_summary(
+            row["api_token"],
+            row.get("workspace_name"),
+            team_id=row.get("external_team_id"),
+        )
+    except Exception:
+        return 0
+    return sync_clickup_tasks_to_db(db, user_id, summary)
+
+
 def sync_clickup_tasks_to_db(db, user_id: str, clickup_summary: dict | None) -> int:
     """Import open ClickUp assigned tasks into Freeside pending pool (dedupe by title)."""
     if not clickup_summary or not clickup_summary.get("tasks"):
