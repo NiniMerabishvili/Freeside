@@ -27,11 +27,19 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+try:
+    from google import genai
+    from google.genai import types
+    _GEMINI_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - exercised in minimal CI envs
+    genai = None  # type: ignore[assignment]
+    types = None  # type: ignore[assignment]
+    _GEMINI_IMPORT_ERROR = exc
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
@@ -41,7 +49,11 @@ logger = logging.getLogger(__name__)
 GEMINI = "gemini"
 ANTHROPIC = "anthropic"
 
-_gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
+_gemini_client = (
+    genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
+    if genai is not None
+    else None
+)
 
 
 @dataclass(frozen=True)
@@ -69,12 +81,135 @@ TASK_MODELS: dict[str, ModelSpec] = {
     "brain_dump_parse": ModelSpec(GEMINI, "gemini-2.5-flash", 0.3, 600),
     "micro_step":       ModelSpec(GEMINI, "gemini-2.5-flash", 0.4, 400),
     "task_split":       ModelSpec(GEMINI, "gemini-2.5-flash", 0.4, 500),
+    "project_memory_plan": ModelSpec(GEMINI, "gemini-2.5-flash", 0.4, 1200),
     # Open-ended chat / agentic → Sonnet tier in the plan.
     "copilot_chat":     ModelSpec(GEMINI, "gemini-2.5-flash", 0.7, 1000),         # target: claude-sonnet-4.6
     "copilot_action":   ModelSpec(GEMINI, "gemini-2.5-flash", 0.4, 800),          # target: claude-sonnet-4.6
 }
 
 DEFAULT_SPEC = ModelSpec(GEMINI, "gemini-2.5-flash")
+
+
+class ModelResponseError(Exception):
+    """Raised when a model response cannot satisfy the expected contract."""
+
+    def __init__(
+        self,
+        task_type: str,
+        message: str,
+        *,
+        cause: Exception | None = None,
+        raw_response: Any | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.task_type = task_type
+        self.message = message
+        self.cause = cause
+        self.raw_response = raw_response
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+
+class EnergyInferenceResponse(_StrictModel):
+    suggested_score: int = Field(ge=1, le=10)
+    suggested_level: Literal["high", "balanced", "low"]
+    reasoning: str = Field(min_length=1)
+
+
+class TaskSpecResponse(_StrictModel):
+    title: str = Field(min_length=1)
+    cognitive_load_score: int = Field(ge=1, le=10)
+    estimated_minutes: int | None = Field(default=None, ge=1, le=480)
+    reasoning: str | None = None
+
+
+class BrainDumpTaskResponse(_StrictModel):
+    title: str = Field(min_length=1)
+    cognitive_load_score: int = Field(ge=1, le=10)
+
+
+class MicroStepResponse(_StrictModel):
+    text: str | None = None
+    title: str | None = None
+    step: str | None = None
+
+    @model_validator(mode="after")
+    def _has_step_text(self) -> "MicroStepResponse":
+        if not (self.text or self.title or self.step):
+            raise ValueError("micro-step response requires text, title, or step")
+        return self
+
+
+class TaskSplitResponse(_StrictModel):
+    title: str = Field(min_length=1)
+    cognitive_load_score: int = Field(ge=1, le=10)
+    step_order: int = Field(ge=1, le=20)
+
+
+class ProjectPlanTaskResponse(_StrictModel):
+    title: str = Field(min_length=1)
+    cognitive_load_score: int = Field(ge=1, le=10)
+    estimated_minutes: int = Field(ge=5, le=240)
+    source_refs: list[str] = Field(default_factory=list)
+
+
+class ProjectPlanMilestoneResponse(_StrictModel):
+    title: str = Field(min_length=1)
+    cognitive_load_score: int = Field(ge=1, le=10)
+    estimated_minutes: int = Field(ge=15, le=480)
+    source_refs: list[str] = Field(default_factory=list)
+    tasks: list[ProjectPlanTaskResponse] = Field(default_factory=list)
+
+
+class ProjectMemoryPlanResponse(_StrictModel):
+    reply: str = Field(min_length=1)
+    milestones: list[ProjectPlanMilestoneResponse] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
+
+
+JSON_OBJECT_SCHEMAS: dict[str, type[BaseModel]] = {
+    "energy_inference": EnergyInferenceResponse,
+    "project_memory_plan": ProjectMemoryPlanResponse,
+}
+
+JSON_ARRAY_SCHEMAS: dict[str, type[BaseModel]] = {
+    "goal_decompose": TaskSpecResponse,
+    "brain_dump_parse": BrainDumpTaskResponse,
+    "micro_step": MicroStepResponse,
+    "task_split": TaskSplitResponse,
+}
+
+JSON_CONTRACT_HINTS: dict[str, str] = {
+    "energy_inference": (
+        '{"suggested_score": integer 1-10, '
+        '"suggested_level": "high"|"balanced"|"low", '
+        '"reasoning": non-empty string}'
+    ),
+    "goal_decompose": (
+        '[{"title": non-empty string, "cognitive_load_score": integer 1-10, '
+        '"estimated_minutes": integer minutes, "reasoning": optional string}]'
+    ),
+    "brain_dump_parse": (
+        '[{"title": non-empty string, "cognitive_load_score": integer 1-10}]'
+    ),
+    "micro_step": (
+        '[{"text": non-empty string}]'
+    ),
+    "task_split": (
+        '[{"title": non-empty string, "cognitive_load_score": integer 1-10, '
+        '"step_order": integer >= 1}]'
+    ),
+    "project_memory_plan": (
+        '{"reply": string, "milestones": [{"title": string, '
+        '"cognitive_load_score": integer 1-10, "estimated_minutes": integer, '
+        '"source_refs": [string], "tasks": [{"title": string, '
+        '"cognitive_load_score": integer 1-10, "estimated_minutes": integer, '
+        '"source_refs": [string]}]}], "blockers": [string], "citations": [string]}'
+    ),
+}
 
 
 def resolve_spec(task_type: str) -> ModelSpec:
@@ -179,6 +314,11 @@ def _run_gemini(
     system_instruction: str | None,
     response_schema: Any | None,
 ) -> tuple[str, int | None, int | None]:
+    if _GEMINI_IMPORT_ERROR is not None or _gemini_client is None or types is None:
+        raise RuntimeError(
+            "Gemini provider is not available. Install google-genai and set GEMINI_API_KEY."
+        ) from _GEMINI_IMPORT_ERROR
+
     config_kwargs: dict[str, Any] = {
         "temperature": spec.temperature,
         "max_output_tokens": spec.max_output_tokens,
@@ -227,6 +367,76 @@ def _dispatch(
     raise ValueError(f"Unknown provider: {spec.provider}")
 
 
+def _strict_retry_contents(contents: Any, task_type: str) -> str:
+    hint = JSON_CONTRACT_HINTS.get(task_type, "valid JSON for this task")
+    return (
+        f"{contents}\n\n"
+        "Return ONLY valid JSON matching this shape: "
+        f"{hint}. Do not include markdown fences, comments, or prose."
+    )
+
+
+def _validate_object(task_type: str, data: dict) -> dict:
+    schema = JSON_OBJECT_SCHEMAS.get(task_type)
+    if schema is None:
+        return data
+    try:
+        return schema.model_validate(data).model_dump(exclude_none=True)
+    except ValidationError as exc:
+        raise ModelResponseError(
+            task_type,
+            f"Model response failed {task_type} schema validation.",
+            cause=exc,
+            raw_response=data,
+        ) from exc
+
+
+def _validate_array(task_type: str, data: list) -> list:
+    schema = JSON_ARRAY_SCHEMAS.get(task_type)
+    if schema is None:
+        return data
+    validated = []
+    try:
+        for item in data:
+            validated.append(schema.model_validate(item).model_dump(exclude_none=True))
+        return validated
+    except ValidationError as exc:
+        raise ModelResponseError(
+            task_type,
+            f"Model response failed {task_type} array schema validation.",
+            cause=exc,
+            raw_response=data,
+        ) from exc
+
+
+def _parse_json_object(task_type: str, text: str) -> dict:
+    try:
+        return _validate_object(task_type, extract_json(text))
+    except ModelResponseError:
+        raise
+    except Exception as exc:
+        raise ModelResponseError(
+            task_type,
+            f"Model response was not valid JSON for {task_type}.",
+            cause=exc,
+            raw_response=text,
+        ) from exc
+
+
+def _parse_json_array(task_type: str, text: str) -> list:
+    try:
+        return _validate_array(task_type, extract_json_array(text))
+    except ModelResponseError:
+        raise
+    except Exception as exc:
+        raise ModelResponseError(
+            task_type,
+            f"Model response was not a valid JSON array for {task_type}.",
+            cause=exc,
+            raw_response=text,
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -263,6 +473,12 @@ def generate_text(
             )
             return text
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, NotImplementedError):
+                exc = ModelResponseError(
+                    task_type,
+                    str(exc),
+                    cause=exc,
+                )
             transient = not is_quota_error(exc)
             if transient and attempt < retries:
                 attempt += 1
@@ -284,13 +500,20 @@ def generate_text(
                     )
                     return text
                 except Exception as fb_exc:  # noqa: BLE001
-                    exc = fb_exc
+                    if isinstance(fb_exc, NotImplementedError):
+                        exc = ModelResponseError(
+                            task_type,
+                            str(fb_exc),
+                            cause=fb_exc,
+                        )
+                    else:
+                        exc = fb_exc
             _log_usage(
                 task_type=task_type, spec=spec, tokens_in=None, tokens_out=None,
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 cache_hit=False, ok=False, error=str(exc), user_id=user_id,
             )
-            raise
+            raise exc
 
 
 def generate_json(
@@ -301,16 +524,37 @@ def generate_json(
     response_schema: Any | None = None,
     user_id: str | None = None,
 ) -> dict:
-    """Route a call and parse the first JSON object from the response."""
-    return extract_json(
-        generate_text(
+    """Route a call, parse JSON, validate it, and retry once on bad shape."""
+    text = generate_text(
+        task_type,
+        contents=contents,
+        system_instruction=system_instruction,
+        response_schema=response_schema,
+        user_id=user_id,
+    )
+    try:
+        return _parse_json_object(task_type, text)
+    except ModelResponseError as first_error:
+        retry_text = generate_text(
             task_type,
-            contents=contents,
+            contents=_strict_retry_contents(contents, task_type),
             system_instruction=system_instruction,
             response_schema=response_schema,
             user_id=user_id,
+            retries=0,
         )
-    )
+        try:
+            return _parse_json_object(task_type, retry_text)
+        except ModelResponseError as second_error:
+            raise ModelResponseError(
+                task_type,
+                f"Model response for {task_type} failed validation after one retry.",
+                cause=second_error,
+                raw_response={
+                    "first": first_error.raw_response,
+                    "retry": second_error.raw_response,
+                },
+            ) from second_error
 
 
 def generate_json_array(
@@ -321,13 +565,34 @@ def generate_json_array(
     response_schema: Any | None = None,
     user_id: str | None = None,
 ) -> list:
-    """Route a call and parse the first JSON array from the response."""
-    return extract_json_array(
-        generate_text(
+    """Route a call, parse JSON array, validate it, and retry once on bad shape."""
+    text = generate_text(
+        task_type,
+        contents=contents,
+        system_instruction=system_instruction,
+        response_schema=response_schema,
+        user_id=user_id,
+    )
+    try:
+        return _parse_json_array(task_type, text)
+    except ModelResponseError as first_error:
+        retry_text = generate_text(
             task_type,
-            contents=contents,
+            contents=_strict_retry_contents(contents, task_type),
             system_instruction=system_instruction,
             response_schema=response_schema,
             user_id=user_id,
+            retries=0,
         )
-    )
+        try:
+            return _parse_json_array(task_type, retry_text)
+        except ModelResponseError as second_error:
+            raise ModelResponseError(
+                task_type,
+                f"Model response for {task_type} failed validation after one retry.",
+                cause=second_error,
+                raw_response={
+                    "first": first_error.raw_response,
+                    "retry": second_error.raw_response,
+                },
+            ) from second_error

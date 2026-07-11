@@ -19,6 +19,8 @@ from services.clickup import (
     list_teams,
     verify_token,
 )
+from services.integration_errors import ClickUpAuthError, ClickUpSyncError
+from services.token_vault import get_api_token, set_api_token
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
@@ -40,6 +42,11 @@ class ClickUpWorkspaceRequest(BaseModel):
     user_id: str
     team_id: str
     team_name: str
+
+
+def _clickup_http_exception(exc: ClickUpAuthError | ClickUpSyncError) -> HTTPException:
+    status_code = 401 if isinstance(exc, ClickUpAuthError) else 503
+    return HTTPException(status_code=status_code, detail=exc.message)
 
 
 def _clickup_oauth_configured() -> bool:
@@ -67,7 +74,10 @@ def _load_clickup_row(user_id: str) -> dict | None:
     try:
         resp = (
             supabase.table("user_integrations")
-            .select("*")
+            .select(
+                "user_id, integration_type, is_connected, context_notes, "
+                "workspace_name, external_team_id, account_label, created_at, updated_at"
+            )
             .eq("user_id", user_id)
             .eq("integration_type", "clickup")
             .limit(1)
@@ -84,7 +94,7 @@ def _load_clickup_row(user_id: str) -> dict | None:
 def integration_status(user_id: str):
     """Return connection status for supported integrations."""
     clickup = _load_clickup_row(user_id) or {}
-    has_token = bool(clickup.get("is_connected") and clickup.get("api_token"))
+    has_token = bool(clickup.get("is_connected") and get_api_token(user_id, supabase))
     has_workspace = bool(clickup.get("external_team_id"))
     return {
         "clickup": {
@@ -157,12 +167,12 @@ def clickup_auth_callback(code: str | None = None, state: str | None = None, err
         account_label = user.get("email") or user.get("username") or "ClickUp user"
         now = datetime.now(timezone.utc).isoformat()
 
+        set_api_token(user_id, access_token, supabase)
         supabase.table("user_integrations").upsert(
             {
                 "user_id": user_id,
                 "integration_type": "clickup",
                 "is_connected": True,
-                "api_token": access_token,
                 "account_label": account_label,
                 "workspace_name": None,
                 "external_team_id": None,
@@ -182,15 +192,14 @@ def clickup_auth_callback(code: str | None = None, state: str | None = None, err
 def clickup_workspaces(user_id: str):
     """List authorized ClickUp workspaces after OAuth."""
     row = _load_clickup_row(user_id)
-    if not row or not row.get("api_token"):
+    api_token = get_api_token(user_id, supabase) if row else None
+    if not row or not api_token:
         raise HTTPException(status_code=404, detail="ClickUp not connected. Sign in first.")
 
     try:
-        teams = list_teams(row["api_token"])
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
-            raise HTTPException(status_code=400, detail="ClickUp session expired. Connect again.") from exc
-        raise HTTPException(status_code=502, detail="Could not reach ClickUp API.") from exc
+        teams = list_teams(api_token)
+    except (ClickUpAuthError, ClickUpSyncError) as exc:
+        raise _clickup_http_exception(exc) from exc
 
     return {
         "account_label": row.get("account_label"),
@@ -205,7 +214,8 @@ def clickup_workspaces(user_id: str):
 def select_clickup_workspace(request: ClickUpWorkspaceRequest):
     """Save the workspace the user chose after OAuth."""
     row = _load_clickup_row(request.user_id)
-    if not row or not row.get("api_token"):
+    api_token = get_api_token(request.user_id, supabase) if row else None
+    if not row or not api_token:
         raise HTTPException(status_code=404, detail="ClickUp not connected. Sign in first.")
 
     team_id = request.team_id.strip()
@@ -215,14 +225,12 @@ def select_clickup_workspace(request: ClickUpWorkspaceRequest):
 
     try:
         summary = fetch_clickup_summary(
-            row["api_token"],
+            api_token,
             team_name,
             team_id=team_id,
         )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
-            raise HTTPException(status_code=400, detail="ClickUp session expired. Connect again.") from exc
-        raise HTTPException(status_code=502, detail="Could not reach ClickUp API.") from exc
+    except (ClickUpAuthError, ClickUpSyncError) as exc:
+        raise _clickup_http_exception(exc) from exc
 
     now = datetime.now(timezone.utc).isoformat()
     supabase.table("user_integrations").upsert(
@@ -230,7 +238,6 @@ def select_clickup_workspace(request: ClickUpWorkspaceRequest):
             "user_id": request.user_id,
             "integration_type": "clickup",
             "is_connected": True,
-            "api_token": row["api_token"],
             "account_label": row.get("account_label"),
             "workspace_name": team_name,
             "external_team_id": team_id,
@@ -250,12 +257,12 @@ def select_clickup_workspace(request: ClickUpWorkspaceRequest):
 
 @router.delete("/clickup/disconnect")
 def disconnect_clickup(user_id: str):
+    set_api_token(user_id, None, supabase)
     supabase.table("user_integrations").upsert(
         {
             "user_id": user_id,
             "integration_type": "clickup",
             "is_connected": False,
-            "api_token": None,
             "workspace_name": None,
             "external_team_id": None,
             "account_label": None,
@@ -270,7 +277,8 @@ def disconnect_clickup(user_id: str):
 def clickup_tasks_preview(user_id: str):
     """Live task fetch for Settings preview."""
     row = _load_clickup_row(user_id)
-    if not row or not row.get("api_token"):
+    api_token = get_api_token(user_id, supabase) if row else None
+    if not row or not api_token:
         raise HTTPException(status_code=404, detail="ClickUp not connected.")
 
     if not row.get("external_team_id"):
@@ -278,13 +286,11 @@ def clickup_tasks_preview(user_id: str):
 
     try:
         summary = fetch_clickup_summary(
-            row["api_token"],
+            api_token,
             row.get("workspace_name"),
             team_id=row.get("external_team_id"),
         )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
-            raise HTTPException(status_code=400, detail="ClickUp session expired. Connect again.") from exc
-        raise HTTPException(status_code=502, detail="ClickUp API error.") from exc
+    except (ClickUpAuthError, ClickUpSyncError) as exc:
+        raise _clickup_http_exception(exc) from exc
 
     return summary

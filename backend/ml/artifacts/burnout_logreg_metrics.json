@@ -1,0 +1,10 @@
+{
+  "training_source": "synthetic_weak_labels",
+  "rows": 600,
+  "positive_rate": 0.5483,
+  "accuracy": 0.94,
+  "precision": 0.9506,
+  "recall": 0.939,
+  "f1": 0.9448,
+  "roc_auc": 0.9882
+}

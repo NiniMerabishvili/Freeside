@@ -138,6 +138,16 @@ CLICKUP_CLIENT_ID=
 CLICKUP_CLIENT_SECRET=
 BACKEND_URL=http://localhost:8000
 FRONTEND_URL=http://localhost:3000
+ENCRYPTION_KEY=
+```
+
+For OAuth/API token encryption, `ENCRYPTION_KEY` should match the Supabase/Postgres
+key passed to the service-role vault RPCs. Hosted Supabase may reject custom
+`ALTER DATABASE ... SET app.settings.*` parameters, so keep the key in backend
+server-side env and run the one-time backfill RPC after applying the migration:
+
+```sql
+SELECT * FROM public.backfill_encrypted_oauth_tokens('<same-strong-random-key>');
 ```
 
 ### 3. Frontend
@@ -244,7 +254,7 @@ Key metrics: activation rate, D7 retention, routing accuracy (user completes vs 
 ## Security & privacy
 
 - Row Level Security on all user tables
-- OAuth tokens encrypted at rest (Phase 0 migration)
+- OAuth tokens encrypted at rest with pgcrypto; backend access goes through service-role vault RPCs only
 - Co-Pilot never writes to Calendar/ClickUp without explicit user confirmation
 - Wellbeing-adjacent data (energy, sleep) covered by Privacy Policy + DPA (Phase 5)
 - Service-role key server-side only — frontend uses anon key + user JWT

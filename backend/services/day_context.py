@@ -1,10 +1,16 @@
 """Gather calendar, ClickUp, and Co-Pilot context for day planning."""
 from __future__ import annotations
 
+import logging
+
 from services.calendar import get_today_events, summarize_events
-from services.clickup import get_clickup_context_from_db, fetch_clickup_summary, format_clickup_block
+from services.clickup import fetch_clickup_summary, format_clickup_block
 from services.copilot_history import fetch_recent_copilot_conversation
+from services.token_vault import get_api_token, get_google_refresh_token
 from services.integration_errors import (
+    CalendarSyncError,
+    ClickUpAuthError,
+    ClickUpSyncError,
     SyncWarning,
     SyncErrorCode,
     SYNC_ERROR_MESSAGES,
@@ -12,12 +18,17 @@ from services.integration_errors import (
     calendar_warning_from_exception,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _load_clickup_row(db, user_id: str) -> dict | None:
     try:
         resp = (
             db.table("user_integrations")
-            .select("*")
+            .select(
+                "user_id, integration_type, is_connected, context_notes, "
+                "workspace_name, external_team_id, account_label, created_at, updated_at"
+            )
             .eq("user_id", user_id)
             .eq("integration_type", "clickup")
             .eq("is_connected", True)
@@ -26,8 +37,13 @@ def _load_clickup_row(db, user_id: str) -> dict | None:
         )
         rows = resp.data or []
         return rows[0] if rows else None
-    except Exception:
-        return None
+    except Exception as exc:
+        logger.warning(
+            "ClickUp integration lookup failed for user_id=%s: %s",
+            user_id,
+            str(exc)[:200],
+        )
+        raise ClickUpSyncError(cause=exc) from exc
 
 
 def gather_day_context(db, user_id: str, profile: dict | None = None) -> dict:
@@ -44,30 +60,64 @@ def gather_day_context(db, user_id: str, profile: dict | None = None) -> dict:
 
     calendar_summary = None
     calendar_connected = bool(profile.get("google_calendar_connected"))
-    if calendar_connected and profile.get("google_refresh_token"):
+    sync_warnings: list[SyncWarning] = []
+    if calendar_connected:
         try:
-            events = get_today_events(profile["google_refresh_token"])
+            refresh_token = get_google_refresh_token(user_id, db)
+            if not refresh_token:
+                raise CalendarSyncError(
+                    SyncErrorCode.CALENDAR_NOT_CONNECTED,
+                    SYNC_ERROR_MESSAGES[SyncErrorCode.CALENDAR_NOT_CONNECTED],
+                )
+            events = get_today_events(refresh_token)
             calendar_summary = summarize_events(events)
-        except Exception:
+        except CalendarSyncError as exc:
+            logger.warning(
+                "Calendar sync failed for user_id=%s code=%s: %s",
+                user_id,
+                exc.code.value,
+                str(exc.cause or exc)[:200],
+            )
+            sync_warnings.append(calendar_warning_from_exception(exc))
             calendar_connected = False
 
-    clickup_row = _load_clickup_row(db, user_id)
+    clickup_row = None
     clickup_summary = None
-    clickup_connected = bool(clickup_row and clickup_row.get("api_token"))
+    try:
+        clickup_row = _load_clickup_row(db, user_id)
+    except ClickUpSyncError as exc:
+        sync_warnings.append(clickup_warning_from_exception(exc))
+
+    api_token = get_api_token(user_id, db) if clickup_row else None
+    clickup_connected = bool(clickup_row and api_token)
     if clickup_connected and clickup_row.get("external_team_id"):
         try:
             clickup_summary = fetch_clickup_summary(
-                clickup_row["api_token"],
+                api_token,
                 clickup_row.get("workspace_name"),
                 team_id=clickup_row.get("external_team_id"),
             )
-        except Exception:
+        except (ClickUpAuthError, ClickUpSyncError) as exc:
+            logger.warning(
+                "ClickUp sync failed for user_id=%s code=%s: %s",
+                user_id,
+                exc.code.value,
+                str(exc.cause or exc)[:200],
+            )
+            sync_warnings.append(clickup_warning_from_exception(exc))
             clickup_summary = None
-    clickup_block = (
-        format_clickup_block(clickup_summary)
-        if clickup_summary
-        else get_clickup_context_from_db(db, user_id)
-    )
+
+    if clickup_summary:
+        clickup_block = format_clickup_block(clickup_summary)
+    elif clickup_connected and clickup_row and (
+        not clickup_row.get("external_team_id") and not clickup_row.get("workspace_name")
+    ):
+        label = clickup_row.get("account_label") or "ClickUp"
+        clickup_block = f"{label} connected - workspace not selected yet."
+    elif any(w.integration == "clickup" for w in sync_warnings):
+        clickup_block = SYNC_ERROR_MESSAGES[SyncErrorCode.CLICKUP_FETCH_FAILED]
+    else:
+        clickup_block = "ClickUp not connected."
 
     copilot_summary = fetch_recent_copilot_conversation(db, user_id)
 
@@ -87,6 +137,7 @@ def gather_day_context(db, user_id: str, profile: dict | None = None) -> dict:
         "clickup_block": clickup_block,
         "clickup_connected": clickup_connected,
         "copilot_summary": copilot_summary,
+        "sync_warnings": [warning.to_dict() for warning in sync_warnings],
         "has_any_source": has_calendar or has_clickup_tasks or clickup_live or has_copilot,
         "sources_used": _sources_list(calendar_summary, clickup_block, has_copilot),
     }
@@ -137,7 +188,12 @@ def probe_calendar_health(refresh_token: str | None) -> SyncWarning | None:
     try:
         get_today_events(refresh_token)
         return None
-    except Exception as exc:
+    except CalendarSyncError as exc:
+        logger.warning(
+            "Calendar health probe failed code=%s: %s",
+            exc.code.value,
+            str(exc.cause or exc)[:200],
+        )
         return calendar_warning_from_exception(exc)
 
 
@@ -147,8 +203,13 @@ def sync_user_clickup_tasks(db, user_id: str) -> tuple[int, list[SyncWarning]]:
     task pool. Returns (inserted_count, warnings). Never raises.
     """
     warnings: list[SyncWarning] = []
-    row = _load_clickup_row(db, user_id)
-    if not row or not row.get("api_token"):
+    try:
+        row = _load_clickup_row(db, user_id)
+    except ClickUpSyncError as exc:
+        warnings.append(clickup_warning_from_exception(exc))
+        return 0, warnings
+    api_token = get_api_token(user_id, db) if row else None
+    if not row or not api_token:
         return 0, warnings
     if not row.get("external_team_id") and not row.get("workspace_name"):
         warnings.append(SyncWarning(
@@ -159,11 +220,17 @@ def sync_user_clickup_tasks(db, user_id: str) -> tuple[int, list[SyncWarning]]:
         return 0, warnings
     try:
         summary = fetch_clickup_summary(
-            row["api_token"],
+            api_token,
             row.get("workspace_name"),
             team_id=row.get("external_team_id"),
         )
-    except Exception as exc:
+    except (ClickUpAuthError, ClickUpSyncError) as exc:
+        logger.warning(
+            "ClickUp task sync failed for user_id=%s code=%s: %s",
+            user_id,
+            exc.code.value,
+            str(exc.cause or exc)[:200],
+        )
         warnings.append(clickup_warning_from_exception(exc))
         return 0, warnings
     return sync_clickup_tasks_to_db(db, user_id, summary), warnings

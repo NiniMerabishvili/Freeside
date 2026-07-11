@@ -18,6 +18,8 @@ from services.db_compat import update_task_completed
 from services.routing_log import log_routing_snapshot
 from services.task_split import route_with_splits, maybe_complete_parent, parent_progress_percent
 from services.day_context import get_day_plan_focus, sync_user_clickup_tasks, probe_calendar_health
+from services.token_vault import get_google_refresh_token
+from services.embeddings import enqueue_task_completion_embedding
 from services.goal_planning import (
     assign_milestones_to_days,
     forecast_energy_landscape,
@@ -26,6 +28,7 @@ from services.goal_planning import (
     sync_milestone_progress,
     insert_copilot_milestones,
     task_is_due_for_today,
+    annotate_brain_dump_goal_matches,
 )
 from services.daily_scheduler import (
     build_milestone_groups,
@@ -223,7 +226,7 @@ def get_routed_tasks(
         supabase.table("profiles")
         .select(
             "peak_focus_time, role, work_style, daily_work_hours, "
-            "google_calendar_connected, google_refresh_token"
+            "google_calendar_connected"
         )
         .eq("id", user_id)
         .single()
@@ -243,8 +246,13 @@ def get_routed_tasks(
             sync_warnings.extend(w.to_dict() for w in cu_warnings)
         except Exception:
             pass
-        if profile.get("google_calendar_connected") and profile.get("google_refresh_token"):
-            cal_warn = probe_calendar_health(profile.get("google_refresh_token"))
+        refresh_token = (
+            get_google_refresh_token(user_id, supabase)
+            if profile.get("google_calendar_connected")
+            else None
+        )
+        if refresh_token:
+            cal_warn = probe_calendar_health(refresh_token)
             if cal_warn:
                 sync_warnings.append(cal_warn.to_dict())
     if using_override:
@@ -385,7 +393,7 @@ def decompose_goal_route(request: GoalDecomposeRequest):
     """
     profile_resp = (
         supabase.table("profiles")
-        .select("role, work_style, google_calendar_connected, google_refresh_token")
+        .select("role, work_style, google_calendar_connected")
         .eq("id", request.user_id)
         .single()
         .execute()
@@ -414,7 +422,7 @@ def confirm_decomposed_tasks(request: ConfirmTasksRequest):
 
     profile_resp = (
         supabase.table("profiles")
-        .select("role, work_style, google_calendar_connected, google_refresh_token")
+        .select("role, work_style, google_calendar_connected")
         .eq("id", request.user_id)
         .single()
         .execute()
@@ -446,6 +454,7 @@ def brain_dump_route(request: BrainDumpRequest):
     profile = profile_resp.data or {}
 
     tasks = parse_brain_dump(request.raw_text, profile)
+    tasks = annotate_brain_dump_goal_matches(supabase, request.user_id, tasks)
     return {"tasks": tasks}
 
 
@@ -478,6 +487,7 @@ def confirm_brain_dump_tasks(request: ConfirmBrainDumpRequest):
             "title":                t["title"],
             "cognitive_load_score": t.get("cognitive_load_score", 5),
             "source":               "brain_dump",
+            "goal_id":              t.get("goal_id"),
         }).execute()
         if row.data:
             inserted.append(row.data[0])
@@ -587,6 +597,9 @@ def complete_task(task_id: str, request: TaskCompleteRequest):
 
     if not update_resp.data:
         raise HTTPException(status_code=500, detail="Failed to mark task complete.")
+
+    completed_task = {**task, **(update_resp.data[0] if update_resp.data else {})}
+    enqueue_task_completion_embedding(supabase, completed_task)
 
     _insert_session_log(
         {

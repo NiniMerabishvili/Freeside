@@ -2,6 +2,7 @@
 AI service — Google Gemini (google-genai SDK) for energy inference and co-pilot chat.
 """
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -16,6 +17,7 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
 _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
 _MODEL = "gemini-2.5-flash"
+logger = logging.getLogger(__name__)
 
 
 def _extract_json(text: str) -> dict:
@@ -409,7 +411,10 @@ def build_copilot_context(
     try:
         integrations_result = (
             supabase.table("user_integrations")
-            .select("*")
+            .select(
+                "integration_type, is_connected, context_notes, workspace_name, "
+                "external_team_id, account_label"
+            )
             .eq("user_id", user_id)
             .eq("is_connected", True)
             .execute()
@@ -438,7 +443,15 @@ def build_copilot_context(
 {calendar_ctx or 'Not available'}"""
 
     from services.clickup import get_clickup_context_from_db
-    clickup_block = get_clickup_context_from_db(supabase, user_id)
+    try:
+        clickup_block = get_clickup_context_from_db(supabase, user_id)
+    except Exception as exc:
+        logger.warning(
+            "ClickUp context unavailable for user_id=%s: %s",
+            user_id,
+            str(exc)[:200],
+        )
+        clickup_block = f"ClickUp unavailable: {str(exc)[:120]}"
 
     return f"""You are the Freeside AI Co-Pilot — a calm, empathetic, highly personalised productivity coach.
 
@@ -504,7 +517,7 @@ def _format_integrations(integrations: list) -> str:
         line = f"- {label}"
         if workspace:
             line += f" | Workspace: {workspace}"
-        if intg.get("api_token"):
+        if intg.get("is_connected"):
             line += " | API connected"
         if notes:
             line += f"\n  Context: {notes}"

@@ -1,14 +1,19 @@
 """Daily task generation — energy, time blocks, and calendar-aware scheduling."""
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from supabase import Client
 
 from services.calendar import get_today_events, summarize_events
+from services.integration_errors import CalendarSyncError
 from services.router import route_tasks
+from services.token_vault import get_google_refresh_token
 from services.time_blocks import compute_free_blocks, summarize_free_time
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_time(value: str | None) -> time | None:
@@ -240,11 +245,22 @@ def generate_daily_schedule(
 
     events: list = []
     meeting_minutes = 0
-    if profile.get("google_calendar_connected") and profile.get("google_refresh_token"):
+    refresh_token = (
+        get_google_refresh_token(user_id, db)
+        if profile.get("google_calendar_connected")
+        else None
+    )
+    if refresh_token:
         try:
-            events = get_today_events(profile["google_refresh_token"])
+            events = get_today_events(refresh_token)
             meeting_minutes = summarize_events(events).get("total_meeting_minutes", 0)
-        except Exception:
+        except CalendarSyncError as exc:
+            logger.warning(
+                "Calendar unavailable for daily schedule user_id=%s code=%s: %s",
+                user_id,
+                exc.code.value,
+                str(exc.cause or exc)[:200],
+            )
             events = []
 
     free_blocks = compute_free_blocks(events, profile)

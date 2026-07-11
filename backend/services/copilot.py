@@ -155,7 +155,7 @@ def reply_for_user(
     raw model reply (tags intact, for downstream parsing) plus a fallback flag.
     """
     freeside_context = build_context_for_user(
-        db, user_id, completion_rate_7d=completion_rate_7d
+        db, user_id, current_turn=user_message, completion_rate_7d=completion_rate_7d
     )
     return _run(freeside_context, user_message, conversation_history or [], language=language)
 

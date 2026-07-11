@@ -1,7 +1,7 @@
 """
 Co-Pilot routes — Context-aware AI chat with micro-step generation.
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import logging
@@ -18,6 +18,8 @@ from services.day_context import (
     sync_clickup_tasks_to_db,
     set_day_plan_focus,
 )
+from services.copilot_rate_limit import RateLimitResult, copilot_rate_limiter
+from services.embeddings import enqueue_copilot_turn_embedding
 
 from services.copilot import reply_for_user
 from services.copilot_actions import (
@@ -51,12 +53,41 @@ class ChatRequest(BaseModel):
     energy_score: Optional[int] = None
     energy_level: Optional[str] = None
     language: Optional[str] = None       # BCP-47 hint from the browser (e.g. 'ka', 'en-US')
+    pricing_tier: str = "free"
 
 
 class PlanDayRequest(BaseModel):
     user_id: str
     energy_score: int
     energy_level: str
+    pricing_tier: str = "free"
+
+
+def _raise_rate_limited(result: RateLimitResult) -> None:
+    raise HTTPException(
+        status_code=429,
+        detail={
+            "error": "rate_limited",
+            "message": "Co-Pilot is moving a little too fast. Please try again soon.",
+            "retry_after_seconds": result.retry_after_seconds,
+            "reason": result.reason,
+            "limit": result.limit,
+            "window_seconds": result.window_seconds,
+        },
+        headers={"Retry-After": str(result.retry_after_seconds)},
+    )
+
+
+def _check_turn_limit(user_id: str, pricing_tier: str) -> None:
+    result = copilot_rate_limiter.check_turn(user_id, pricing_tier)
+    if not result.allowed:
+        _raise_rate_limited(result)
+
+
+def _check_tool_limit(user_id: str, pricing_tier: str, count: int) -> None:
+    result = copilot_rate_limiter.check_tool_calls(user_id, count, pricing_tier)
+    if not result.allowed:
+        _raise_rate_limited(result)
 
 
 @router.post("/plan-day")
@@ -65,6 +96,7 @@ def plan_day(request: PlanDayRequest):
     Generate day-plan task suggestions using calendar, profile, tasks, goals,
     and recent Co-Pilot activity. Called when the user clicks Start my day.
     """
+    _check_turn_limit(request.user_id, request.pricing_tier)
     try:
         context = build_copilot_context(
             request.user_id,
@@ -99,6 +131,11 @@ Name tasks clearly for my Freeside task list."""
             supabase, request.user_id, day_ctx.get("clickup_summary")
         )
         if suggested_milestones:
+            _check_tool_limit(
+                request.user_id,
+                request.pricing_tier,
+                len(suggested_milestones),
+            )
             inserted_result = insert_copilot_milestones(
                 supabase, request.user_id, suggested_milestones
             )
@@ -116,8 +153,11 @@ Name tasks clearly for my Freeside task list."""
             "added_tasks_count": added_count,
             "focus_titles": focus_titles,
             "sources_used": day_ctx.get("sources_used", []),
+            "sync_warnings": day_ctx.get("sync_warnings", []),
             "ai_fallback": result.get("ai_fallback", False),
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("Plan day failed: %s", str(exc)[:200])
         return {"reply": "", "suggested_tasks": []}
@@ -134,6 +174,8 @@ def chat(request: ChatRequest):
     out of the reply so the UI can render clean, human-readable language.
     """
     # Determine message type — used by PFI metric (breakdown frequency)
+    _check_turn_limit(request.user_id, request.pricing_tier)
+
     if request.message_type:
         msg_type = request.message_type
     elif any(kw in request.message.lower() for kw in ["break", "breakdown", "micro", "steps"]):
@@ -164,10 +206,17 @@ def chat(request: ChatRequest):
             energy_profile = extract_energy_profile(raw_reply)
             task_cards = extract_task_cards(raw_reply)
             actions = parse_copilot_actions(raw_reply)
+            _check_tool_limit(
+                request.user_id,
+                request.pricing_tier,
+                len(task_cards) + len(actions),
+            )
             suggested_tasks = task_cards_to_suggestions(task_cards)
 
         # Strip machine-readable blocks so the bubble shows only natural language.
         reply = strip_structured_blocks(raw_reply) or raw_reply
+    except HTTPException:
+        raise
     except Exception as exc:
         err_str = str(exc)
         logger.warning("Copilot chat failed: %s", err_str[:200])
@@ -182,7 +231,7 @@ def chat(request: ChatRequest):
             reply = "I had trouble responding. Please check that the backend is running and try again."
 
     try:
-        log_copilot_exchange(
+        turn = log_copilot_exchange(
             supabase,
             user_id=request.user_id,
             message_type=msg_type,
@@ -191,6 +240,8 @@ def chat(request: ChatRequest):
             task_id=request.task_id,
             energy_level=request.energy_level,
         )
+        if turn and turn.get("id"):
+            enqueue_copilot_turn_embedding(supabase, turn)
     except Exception:
         pass
 

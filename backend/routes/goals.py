@@ -19,6 +19,7 @@ from services.goal_planning import (
     insert_scheduled_milestones,
 )
 from services.ai import decompose_goal
+from services.embeddings import enqueue_goal_creation_embedding
 
 router = APIRouter()
 
@@ -49,7 +50,7 @@ def _load_profile(user_id: str) -> dict:
     resp = (
         supabase.table("profiles")
         .select(
-            "role, work_style, peak_focus_time, google_calendar_connected, google_refresh_token"
+            "role, work_style, peak_focus_time, google_calendar_connected"
         )
         .eq("id", user_id)
         .single()
@@ -108,7 +109,9 @@ def create_goal(request: GoalCreateRequest):
         }).execute()
     if not row.data:
         raise HTTPException(status_code=500, detail="Failed to create goal")
-    return row.data[0]
+    goal = row.data[0]
+    enqueue_goal_creation_embedding(supabase, goal)
+    return goal
 
 
 @router.post("/preview-schedule")

@@ -12,6 +12,7 @@ import CoPilot, { type CopilotSuggestedMilestone } from '@/components/CoPilot'
 import SuggestedTasksPanel, { type SuggestedMilestone } from '@/components/SuggestedTasksPanel'
 import SyncWarningsBanner, { type SyncWarning } from '@/components/SyncWarningsBanner'
 import GoalsPanel from '@/components/GoalsPanel'
+import ProjectMemoryPanel from '@/components/ProjectMemoryPanel'
 import { supabase } from '@/lib/supabase'
 import { effectiveTaskXp, taskXp } from '@/lib/xp'
 
@@ -991,6 +992,12 @@ export default function DashboardPage() {
     )
   }, [])
 
+  const handleProjectMemoryMilestones = useCallback((incoming: SuggestedMilestone[]) => {
+    if (!incoming.length) return
+    setSuggestionsAiFallback(false)
+    setSuggestedMilestones(incoming)
+  }, [])
+
   const fetchCompletedTasks = useCallback(async (uid: string) => {
     try {
       const res  = await fetch(`${API}/tasks/completed?user_id=${uid}`)
@@ -1258,6 +1265,15 @@ export default function DashboardPage() {
               userId={userId}
               refreshKey={goalsRefreshKey}
               onGoalsChanged={() => userId && void fetchTasks(userId)}
+            />
+          )}
+
+          {userId && (
+            <ProjectMemoryPanel
+              userId={userId}
+              energyScore={energyScore}
+              energyLevel={energyLevel}
+              onMilestonesSuggested={handleProjectMemoryMilestones}
             />
           )}
 

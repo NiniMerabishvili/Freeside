@@ -5,8 +5,8 @@ Fetches live data (Google Calendar + ClickUp), computes today's metrics, and
 assembles the <freeside_context> XML block injected before every model call.
 
 Adapted to the Freeside repo conventions:
-- Google Calendar auth uses a stored refresh token (profiles.google_refresh_token),
-  not a raw Credentials object.
+- Google Calendar auth uses a vault-decrypted refresh token, not a raw
+  Credentials object.
 - ClickUp uses httpx via the helpers in services/clickup.py (not requests).
 - Timezone handling uses the stdlib (no pytz dependency).
 """
@@ -26,6 +26,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from services.clickup import CLICKUP_API, PRIORITY_LABEL, _headers, verify_token
+from services.embeddings import embed_text
+from services.token_vault import get_api_token, get_google_refresh_token
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
@@ -316,6 +318,8 @@ def build_freeside_context(
     completion_rate_7d: float = 0.7,
     *,
     clickup_user_id: int | None = None,
+    relevant_history: list[dict] | None = None,
+    burnout_risk: dict | None = None,
 ) -> str:
     """
     Assemble the full <freeside_context> XML block.
@@ -324,6 +328,7 @@ def build_freeside_context(
     list rather than raising, so the Copilot always gets a valid context block.
     """
     energy_history = energy_history or []
+    relevant_history = relevant_history or []
 
     calendar_events: list[dict] = []
     if credentials:
@@ -348,6 +353,26 @@ def build_freeside_context(
     today_metrics["completion_rate_7d"] = completion_rate_7d
 
     profile = _profile_view(user_profile)
+    burnout_block = ""
+    if burnout_risk:
+        if burnout_risk.get("status") == "insufficient_data":
+            burnout_block = f"""
+  <burnout_risk>
+    status: insufficient_data
+    risk_band: insufficient_data
+    reason: {burnout_risk.get("reason") or "Not enough recent data yet."}
+    computed_at: {burnout_risk.get("computed_at") or "unknown"}
+  </burnout_risk>
+"""
+        else:
+            burnout_block = f"""
+  <burnout_risk>
+    score: {burnout_risk["score"]}
+    risk_band: {burnout_risk["risk_band"]}
+    computed_at: {burnout_risk.get("computed_at") or "unknown"}
+    model_version: {burnout_risk.get("model_version") or "unknown"}
+  </burnout_risk>
+"""
 
     context = f"""<freeside_context>
   <user_profile>
@@ -371,6 +396,11 @@ def build_freeside_context(
   <energy_history>
 {json.dumps(energy_history, indent=4)}
   </energy_history>
+
+  <relevant_history>
+{json.dumps(relevant_history, indent=4)}
+  </relevant_history>
+{burnout_block}
 
   <today_metrics>
     meeting_count: {today_metrics["meeting_count"]}
@@ -404,10 +434,112 @@ def _recent_energy_history(db, user_id: str, limit: int = 7) -> list[dict]:
         return []
 
 
+def fetch_relevant_history(
+    db,
+    user_id: str,
+    current_turn: str | None,
+    *,
+    k: int = 5,
+) -> list[dict]:
+    """
+    Retrieve semantically relevant prior Co-Pilot turns, tasks, and goals.
+
+    Explicitly passes user_id into the SQL function because service-role clients
+    bypass RLS; the database function also filters every source table by user_id.
+    """
+    query = (current_turn or "").strip()
+    if not query:
+        return []
+
+    try:
+        embedding = embed_text(query)
+        rows = (
+            db.rpc(
+                "match_copilot_context",
+                {
+                    "p_user_id": user_id,
+                    "p_embedding": embedding,
+                    "p_match_count": k,
+                },
+            )
+            .execute()
+            .data
+        ) or []
+    except Exception as exc:  # noqa: BLE001 - context should degrade, not fail chat
+        logger.warning("Semantic context retrieval failed user_id=%s: %s", user_id, str(exc)[:200])
+        return []
+
+    relevant: list[dict] = []
+    for row in rows[:k]:
+        relevant.append({
+            "source_type": row.get("source_type"),
+            "source_id": row.get("source_id"),
+            "title": row.get("title"),
+            "content": (row.get("content") or "")[:1200],
+            "similarity": row.get("similarity"),
+            "created_at": row.get("created_at"),
+        })
+    return relevant
+
+
+def _burnout_risk_band(score: float) -> str:
+    if score >= 0.7:
+        return "high"
+    if score >= 0.4:
+        return "moderate"
+    return "low"
+
+
+def fetch_latest_burnout_risk(db, user_id: str) -> dict | None:
+    """Return the latest burnout score context, or None when no score exists."""
+    try:
+        rows = (
+            db.table("burnout_scores")
+            .select("score, label, model_version, computed_at, features")
+            .eq("user_id", user_id)
+            .order("computed_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        ) or []
+    except Exception as exc:  # noqa: BLE001 - context should degrade, not fail chat
+        logger.warning("Burnout risk fetch failed user_id=%s: %s", user_id, str(exc)[:200])
+        return None
+
+    if not rows:
+        return None
+
+    row = rows[0]
+    features = row.get("features") or {}
+    if isinstance(features, dict) and features.get("sufficient_data") is False:
+        return {
+            "status": "insufficient_data",
+            "reason": features.get("insufficient_data_reason") or "Not enough recent data yet.",
+            "computed_at": row.get("computed_at"),
+            "model_version": row.get("model_version"),
+        }
+
+    score = row.get("score")
+    if score is None:
+        return None
+    try:
+        score_float = float(score)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "status": "available",
+        "score": round(score_float, 3),
+        "risk_band": _burnout_risk_band(score_float),
+        "computed_at": row.get("computed_at"),
+        "model_version": row.get("model_version"),
+    }
+
+
 def build_context_for_user(
     db,
     user_id: str,
     *,
+    current_turn: str | None = None,
     completion_rate_7d: float = 0.7,
 ) -> str:
     """
@@ -419,7 +551,7 @@ def build_context_for_user(
     ) or {}
 
     refresh_token = (
-        profile.get("google_refresh_token")
+        get_google_refresh_token(user_id, db)
         if profile.get("google_calendar_connected")
         else None
     )
@@ -428,7 +560,10 @@ def build_context_for_user(
     try:
         rows = (
             db.table("user_integrations")
-            .select("*")
+            .select(
+                "user_id, integration_type, is_connected, context_notes, "
+                "workspace_name, external_team_id, account_label, created_at, updated_at"
+            )
             .eq("user_id", user_id)
             .eq("integration_type", "clickup")
             .eq("is_connected", True)
@@ -437,7 +572,7 @@ def build_context_for_user(
             .data
         ) or []
         if rows:
-            clickup_token = rows[0].get("api_token")
+            clickup_token = get_api_token(user_id, db)
             clickup_team_id = rows[0].get("external_team_id")
     except Exception:
         pass
@@ -450,4 +585,6 @@ def build_context_for_user(
         energy_history=_recent_energy_history(db, user_id),
         overdue_count=None,
         completion_rate_7d=completion_rate_7d,
+        relevant_history=fetch_relevant_history(db, user_id, current_turn, k=5),
+        burnout_risk=fetch_latest_burnout_risk(db, user_id),
     )

@@ -17,6 +17,8 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
 from services.ai import infer_energy_from_day_context
 from services.day_context import gather_day_context
+from services.energy_calibration import apply_energy_bias, energy_bias_for_user
+from services.token_vault import set_google_refresh_token
 
 router = APIRouter()
 
@@ -96,10 +98,13 @@ def suggest_energy(user_id: str):
             "suggestion": None,
             "calendar_not_connected": not day_context.get("calendar_connected"),
             "clickup_not_connected": not day_context.get("clickup_connected"),
+            "sync_warnings": day_context.get("sync_warnings", []),
         }
 
     try:
         suggestion = infer_energy_from_day_context(day_context, profile)
+        bias = energy_bias_for_user(supabase, user_id)
+        suggestion = apply_energy_bias(suggestion, bias)
 
         cal = day_context.get("calendar_summary") or {}
         cu = day_context.get("clickup_summary") or {}
@@ -107,12 +112,15 @@ def suggest_energy(user_id: str):
             "mode":                "ai_suggested",
             "ai_suggested_score":  suggestion["suggested_score"],
             "ai_suggested_level":  suggestion["suggested_level"],
+            "raw_ai_suggested_score": suggestion.get("raw_suggested_score"),
+            "calibration_bias":     suggestion.get("calibration_bias", 0.0),
             "reasoning":           suggestion["reasoning"],
             "calendar_event_count": cal.get("event_count", 0),
             "calendar_summary":    cal.get("event_list", ""),
             "clickup_task_count":  cu.get("task_count", 0),
             "clickup_overdue":     cu.get("overdue_count", 0),
             "sources_used":        day_context.get("sources_used", []),
+            "sync_warnings":       day_context.get("sync_warnings", []),
             "from_cache":          False,
         }
     except Exception as exc:
@@ -126,8 +134,9 @@ def suggest_energy(user_id: str):
         )
         if token_expired:
             # Token is dead — clear the stale connected flag so UI can prompt reconnect.
+            set_google_refresh_token(user_id, None, supabase)
             supabase.table("profiles").update(
-                {"google_calendar_connected": False, "google_refresh_token": None}
+                {"google_calendar_connected": False}
             ).eq("id", user_id).execute()
         return {
             "mode":                      "manual",

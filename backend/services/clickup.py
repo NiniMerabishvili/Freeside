@@ -7,10 +7,30 @@ from typing import Any
 
 import httpx
 
+from services.integration_errors import (
+    ClickUpAuthError,
+    ClickUpSyncError,
+    SYNC_ERROR_MESSAGES,
+    SyncErrorCode,
+)
+from services.token_vault import get_api_token
+
 logger = logging.getLogger(__name__)
 
 CLICKUP_API = "https://api.clickup.com/api/v2"
 PRIORITY_LABEL = {1: "urgent", 2: "high", 3: "normal", 4: "low", None: "none"}
+
+
+def _clickup_error(exc: Exception, operation: str) -> ClickUpAuthError | ClickUpSyncError:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in (401, 403):
+            logger.warning("ClickUp auth failed during %s: status=%s", operation, status)
+            return ClickUpAuthError(cause=exc)
+        logger.warning("ClickUp API failed during %s: status=%s", operation, status)
+        return ClickUpSyncError(cause=exc)
+    logger.warning("ClickUp request failed during %s: %s", operation, str(exc)[:200])
+    return ClickUpSyncError(cause=exc)
 
 
 def auth_header(api_token: str) -> str:
@@ -27,17 +47,23 @@ def _headers(api_token: str) -> dict[str, str]:
 
 def verify_token(api_token: str) -> dict[str, Any]:
     """Validate token and return ClickUp user profile."""
-    with httpx.Client(timeout=20) as client:
-        resp = client.get(f"{CLICKUP_API}/user", headers=_headers(api_token))
-        resp.raise_for_status()
-        return resp.json().get("user", {})
+    try:
+        with httpx.Client(timeout=20) as client:
+            resp = client.get(f"{CLICKUP_API}/user", headers=_headers(api_token))
+            resp.raise_for_status()
+            return resp.json().get("user", {})
+    except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
+        raise _clickup_error(exc, "verify_token") from exc
 
 
 def list_teams(api_token: str) -> list[dict]:
-    with httpx.Client(timeout=20) as client:
-        resp = client.get(f"{CLICKUP_API}/team", headers=_headers(api_token))
-        resp.raise_for_status()
-        return resp.json().get("teams", [])
+    try:
+        with httpx.Client(timeout=20) as client:
+            resp = client.get(f"{CLICKUP_API}/team", headers=_headers(api_token))
+            resp.raise_for_status()
+            return resp.json().get("teams", [])
+    except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
+        raise _clickup_error(exc, "list_teams") from exc
 
 
 def _pick_team(teams: list[dict], workspace_name: str | None, team_id: str | None = None) -> dict | None:
@@ -70,14 +96,17 @@ def fetch_assigned_tasks(
         "order_by": "due_date",
         "reverse": "false",
     }
-    with httpx.Client(timeout=25) as client:
-        resp = client.get(
-            f"{CLICKUP_API}/team/{team_id}/task",
-            headers=_headers(api_token),
-            params=params,
-        )
-        resp.raise_for_status()
-        tasks = resp.json().get("tasks", [])
+    try:
+        with httpx.Client(timeout=25) as client:
+            resp = client.get(
+                f"{CLICKUP_API}/team/{team_id}/task",
+                headers=_headers(api_token),
+                params=params,
+            )
+            resp.raise_for_status()
+            tasks = resp.json().get("tasks", [])
+    except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
+        raise _clickup_error(exc, "fetch_assigned_tasks") from exc
     return tasks[:limit]
 
 
@@ -160,7 +189,11 @@ def fetch_clickup_summary(
     Raises httpx.HTTPStatusError on auth/API failure.
     """
     user = verify_token(api_token)
-    clickup_user_id = int(user["id"])
+    try:
+        clickup_user_id = int(user["id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("ClickUp user profile missing id during summary fetch")
+        raise ClickUpSyncError(cause=exc) from exc
     teams = list_teams(api_token)
     team = _pick_team(teams, workspace_name, team_id)
     if not team:
@@ -211,7 +244,10 @@ def get_clickup_context_from_db(db, user_id: str) -> str:
     try:
         resp = (
             db.table("user_integrations")
-            .select("*")
+            .select(
+                "user_id, integration_type, is_connected, context_notes, "
+                "workspace_name, external_team_id, account_label, created_at, updated_at"
+            )
             .eq("user_id", user_id)
             .eq("integration_type", "clickup")
             .eq("is_connected", True)
@@ -219,10 +255,20 @@ def get_clickup_context_from_db(db, user_id: str) -> str:
             .execute()
         )
         rows = resp.data or []
-    except Exception:
-        return "ClickUp not connected."
+    except Exception as exc:
+        logger.warning(
+            "ClickUp integration lookup failed for user_id=%s: %s",
+            user_id,
+            str(exc)[:200],
+        )
+        raise ClickUpSyncError(
+            SyncErrorCode.CLICKUP_FETCH_FAILED,
+            SYNC_ERROR_MESSAGES[SyncErrorCode.CLICKUP_FETCH_FAILED],
+            cause=exc,
+        ) from exc
 
-    if not rows or not rows[0].get("api_token"):
+    api_token = get_api_token(user_id, db) if rows else None
+    if not rows or not api_token:
         return "ClickUp not connected."
 
     row = rows[0]
@@ -232,12 +278,10 @@ def get_clickup_context_from_db(db, user_id: str) -> str:
 
     try:
         summary = fetch_clickup_summary(
-            row["api_token"],
+            api_token,
             row.get("workspace_name"),
             team_id=row.get("external_team_id"),
         )
         return format_clickup_block(summary)
-    except Exception as exc:
-        logger.warning("ClickUp fetch failed for %s: %s", user_id, str(exc)[:200])
-        ws = row.get("workspace_name") or "ClickUp"
-        return f"{ws} connected but tasks could not be loaded (reconnect in Settings)."
+    except (ClickUpAuthError, ClickUpSyncError):
+        raise

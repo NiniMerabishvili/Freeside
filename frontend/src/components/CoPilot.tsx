@@ -116,9 +116,22 @@ export default function CoPilot({ userId, energyLevel, energyScore, triggerMessa
           energy_score: energyScore ?? null,
           energy_level: energyLevel || null,
           language:     typeof navigator !== 'undefined' ? navigator.language : null,
+          pricing_tier:  'free',
         }),
       })
       const data = await res.json()
+      if (res.status === 429) {
+        const retryAfter = Number(res.headers.get('Retry-After') || data?.detail?.retry_after_seconds || 0)
+        const wait = retryAfter > 0 ? ` Try again in about ${retryAfter} seconds.` : ''
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          text: `${data?.detail?.message ?? 'Co-Pilot is rate limited right now.'}${wait}`,
+        }])
+        return
+      }
+      if (!res.ok) {
+        throw new Error(data?.detail?.message ?? data?.detail ?? 'Co-Pilot request failed')
+      }
       const energyProfile = (data.energy_profile ?? null) as EnergyProfile | null
       setMessages(prev => [...prev, {
         role: 'assistant',

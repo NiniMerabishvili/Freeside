@@ -101,7 +101,7 @@ def log_copilot_exchange(
     assistant_reply: str,
     task_id: str | None = None,
     energy_level: str | None = None,
-) -> None:
+) -> dict | None:
     payload = {
         "user_id": user_id,
         "message_type": message_type,
@@ -111,12 +111,14 @@ def log_copilot_exchange(
         "energy_level_at_time": energy_level,
     }
     try:
-        db.table("copilot_logs").insert(payload).execute()
+        result = db.table("copilot_logs").insert(payload).execute()
+        return result.data[0] if result.data else None
     except Exception:
         # Older schema without message columns
-        db.table("copilot_logs").insert({
+        result = db.table("copilot_logs").insert({
             "user_id": user_id,
             "message_type": message_type,
             "task_id": task_id,
             "energy_level_at_time": energy_level,
         }).execute()
+        return result.data[0] if result.data else None

@@ -1,6 +1,9 @@
 """Multi-day goal planning — milestones entity + child tasks + energy forecasting."""
 from __future__ import annotations
 
+import logging
+import math
+import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
@@ -8,6 +11,100 @@ from supabase import Client
 
 from services.ai import decompose_milestone_tasks
 from services.calendar import get_today_events, summarize_events
+from services.embeddings import embed_text
+from services.integration_errors import CalendarSyncError
+from services.token_vault import get_google_refresh_token
+
+logger = logging.getLogger(__name__)
+
+GOAL_MATCH_THRESHOLD = float(os.getenv("BRAIN_DUMP_GOAL_MATCH_THRESHOLD", "0.85"))
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(y * y for y in b))
+    if not mag_a or not mag_b:
+        return 0.0
+    return dot / (mag_a * mag_b)
+
+
+def suggest_goal_link_for_brain_dump_item(
+    db: Client,
+    user_id: str,
+    item_text: str,
+    *,
+    threshold: float | None = None,
+) -> dict | None:
+    """
+    Suggest linking a brain-dump item to an existing active goal when semantic
+    similarity is high enough. Returns None when the item should stand alone.
+    """
+    threshold = GOAL_MATCH_THRESHOLD if threshold is None else threshold
+    text = (item_text or "").strip()
+    if not text:
+        return None
+
+    try:
+        embedding = embed_text(text)
+        rows = (
+            db.rpc(
+                "match_user_goals",
+                {
+                    "p_user_id": user_id,
+                    "p_embedding": embedding,
+                    "p_match_count": 3,
+                },
+            )
+            .execute()
+            .data
+        ) or []
+    except Exception as exc:  # noqa: BLE001 - suggestions must not block brain dump
+        logger.warning("Brain-dump goal match failed user_id=%s: %s", user_id, str(exc)[:200])
+        return None
+
+    best = None
+    for row in rows:
+        similarity = row.get("similarity")
+        if similarity is None and row.get("embedding") is not None:
+            similarity = _cosine_similarity(embedding, row["embedding"])
+        try:
+            score = float(similarity)
+        except (TypeError, ValueError):
+            continue
+        if best is None or score > best["similarity"]:
+            best = {
+                "goal_id": row.get("goal_id") or row.get("id"),
+                "goal_title": row.get("title"),
+                "similarity": score,
+                "suggestion": "link_existing_goal",
+            }
+
+    if best and best["similarity"] >= threshold:
+        return best
+    return None
+
+
+def annotate_brain_dump_goal_matches(
+    db: Client,
+    user_id: str,
+    items: list[dict],
+    *,
+    threshold: float | None = None,
+) -> list[dict]:
+    annotated: list[dict] = []
+    for item in items:
+        title = str(item.get("title") or "").strip()
+        suggestion = suggest_goal_link_for_brain_dump_item(
+            db, user_id, title, threshold=threshold
+        )
+        if suggestion:
+            annotated.append({**item, **suggestion})
+        else:
+            annotated.append({**item, "suggestion": "create_new_or_unlinked"})
+    return annotated
 
 
 def _parse_log_date(logged_at: str | None) -> date | None:
@@ -52,14 +149,24 @@ def forecast_energy_landscape(
 
     today_meetings = 0
     today_events = 0
-    if profile.get("google_calendar_connected") and profile.get("google_refresh_token"):
+    refresh_token = (
+        get_google_refresh_token(user_id, db)
+        if profile.get("google_calendar_connected")
+        else None
+    )
+    if refresh_token:
         try:
-            events = get_today_events(profile["google_refresh_token"])
+            events = get_today_events(refresh_token)
             summary = summarize_events(events)
             today_meetings = summary.get("total_meeting_minutes", 0)
             today_events = summary.get("event_count", 0)
-        except Exception:
-            pass
+        except CalendarSyncError as exc:
+            logger.warning(
+                "Calendar unavailable for energy forecast user_id=%s code=%s: %s",
+                user_id,
+                exc.code.value,
+                str(exc.cause or exc)[:200],
+            )
 
     landscape: list[dict] = []
     for offset in range(horizon_days):
