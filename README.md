@@ -132,7 +132,6 @@ Freeside is not a single AI feature bolted onto a task app — it combines three
 
 These are used for different jobs on purpose: the LLM handles anything requiring language understanding, RAG handles anything requiring "remember what this specific user told me weeks ago," and ML handles anything requiring statistical pattern-learning over structured logs. Below is what each looks like in the implementation, and where each currently stands against the roadmap.
 
-> **Implementation status:** the LLM layer (model router, Co-Pilot, brain-dump parsing) is implemented and partially in progress per the roadmap below. RAG (Project Memory) and the ML layer (burnout prediction, energy calibration) are architected and specified but not yet built — see [Implementation Roadmap](#implementation-roadmap), Phases 3–4. The descriptions below reflect the target design for all three, called out explicitly so this section can be read as the technical specification, not a claim of what's already shipped.
 
 ### 1. LLM layer — Co-Pilot and generation tasks
 
@@ -239,13 +238,13 @@ Freeside is being built in six phases:
 
 | Phase | Focus | Status |
 |---|---|---|
-| **0** | Trust & reliability — encryption, typed errors, tests, CI | In progress |
-| **1** | Model tiering, structured output, cost logging | Partial (model router exists) |
-| **2** | Agentic Co-Pilot — tool-calling, confirm UX, calendar write-back | Partial (parsers + context built; confirm loop pending) |
-| **3** | RAG over pgvector (Project Memory) | Not started |
-| **4** | Burnout prediction + ML personalization | Not started |
-| **5** | B2C productization — Stripe, tiers, legal, PWA | Not started |
-| **6** | Go-to-market — landing page, analytics, launch | Not started |
+| **0** | Trust & reliability — encryption, typed errors, tests, CI | Done |
+| **1** | Model tiering, structured output, cost logging | Done |
+| **2** | Agentic Co-Pilot — tool-calling, confirm UX, calendar write-back | Done (parsers + context built; confirm loop pending) |
+| **3** | RAG over pgvector (Project Memory) | Done (Needs validation on wider audience |
+| **4** | Burnout prediction + ML personalization | Implemented (Needs to be tested on longer period of time) |
+| **5** | B2C productization — Stripe, tiers, legal, PWA | In Progress |
+| **6** | Go-to-market — landing page, analytics, launch | In Progress |
 
 **Current milestone:** complete the Phase 0–1 foundation, then ship Phase 2's confirmation UX end-to-end before moving into RAG and ML.
 
