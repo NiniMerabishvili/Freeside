@@ -47,6 +47,11 @@ function stripCopilotTags(text: string): string {
     .trim()
 }
 
+function detectMessageLanguage(text: string): 'en' | 'ka' {
+  if (/[\u10A0-\u10FF]/.test(text)) return 'ka'
+  return 'en'
+}
+
 const ENERGY_STYLE: Record<string, { bg: string; color: string; label: string }> = {
   HIGH:   { bg: '#e6f4ea', color: '#2d7a3a', label: 'High energy' },
   MEDIUM: { bg: '#fdf3d0', color: '#7a5c00', label: 'Medium energy' },
@@ -115,7 +120,7 @@ export default function CoPilot({ userId, energyLevel, energyScore, triggerMessa
           message_type: type ?? 'user_initiated',
           energy_score: energyScore ?? null,
           energy_level: energyLevel || null,
-          language:     typeof navigator !== 'undefined' ? navigator.language : null,
+          language:     detectMessageLanguage(text),
           pricing_tier:  'free',
         }),
       })

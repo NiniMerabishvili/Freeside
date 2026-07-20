@@ -8,6 +8,61 @@ Freeside began as a bachelor's thesis proof-of-concept and is now being producti
 
 ---
 
+## Demo
+
+Browse the key product surfaces below. Screenshots live in [\docs/screenshots/\](docs/screenshots/). Add or update files using the names listed in [\docs/screenshots/CAPTURE.md\](docs/screenshots/CAPTURE.md).
+
+### 1. Dashboard overview
+
+Morning view: energy check-in, CLCS-routed tasks, goals, and the Co-Pilot rail in one workspace.
+
+![Freeside dashboard overview](docs/screenshots/01-dashboard-overview.png)
+
+### 2. Energy check-in
+
+AI suggests cognitive energy from calendar + workload; the user confirms or overrides before routing.
+
+![Energy check-in](docs/screenshots/02-energy-checkin.png)
+
+### 3. CLCS task routing
+
+Tasks are split into **active** (fit current capacity) and **deferred** (need higher energy), with unlock cues.
+
+![CLCS task routing](docs/screenshots/03-clcs-routing.png)
+
+### 4. AI Co-Pilot
+
+Context-aware chat that plans the day, proposes task cards, and replies in the user's language (e.g. Georgian or English).
+
+![AI Co-Pilot chat](docs/screenshots/04-copilot-chat.png)
+
+### 5. Project Memory (RAG)
+
+Paste project notes → embed → retrieve similar chunks → generate milestones with **Retrieved context** and similarity scores.
+
+![Project Memory RAG](docs/screenshots/05-project-memory.png)
+
+### 6. Goals and milestones
+
+Multi-day goal decomposition into milestones and child tasks, scheduled against predicted capacity.
+
+![Goals and milestones](docs/screenshots/06-goals-milestones.png)
+
+### 7. Brain dump
+
+Messy free text becomes structured tasks with cognitive load scores, ready for review before saving.
+
+![Brain dump parsing](docs/screenshots/07-brain-dump.png)
+
+### 8. Integrations
+
+Google Calendar (energy + schedule context) and ClickUp (assigned tasks synced into the pool).
+
+![Integrations settings](docs/screenshots/08-integrations.png)
+
+> **Note:** If an image does not appear yet, place a matching PNG in \docs/screenshots/\ using the filename in the path above. See [CAPTURE.md](docs/screenshots/CAPTURE.md) for a capture checklist.
+
+
 ## What Freeside Does
 
 Freeside is built around one question:
