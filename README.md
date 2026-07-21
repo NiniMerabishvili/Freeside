@@ -10,58 +10,57 @@ Freeside began as a bachelor's thesis proof-of-concept and is now being producti
 
 ## Demo
 
-Browse the key product surfaces below. Screenshots live in [\docs/screenshots/\](docs/screenshots/). Add or update files using the names listed in [\docs/screenshots/CAPTURE.md\](docs/screenshots/CAPTURE.md).
+Visual walkthrough of Freeside’s key surfaces. Screenshots live in [`docs/screenshots/`](docs/screenshots/).
 
 ### 1. Dashboard overview
 
-Morning view: energy check-in, CLCS-routed tasks, goals, and the Co-Pilot rail in one workspace.
+Energy panel, routed tasks, goals, and the Co-Pilot rail in one workspace.
 
 ![Freeside dashboard overview](docs/screenshots/01-dashboard-overview.png)
 
 ### 2. Energy check-in
 
-AI suggests cognitive energy from calendar + workload; the user confirms or overrides before routing.
+AI-suggested cognitive energy with user confirm / override.
 
 ![Energy check-in](docs/screenshots/02-energy-checkin.png)
 
-### 3. CLCS task routing
+### 3. XP points
 
-Tasks are split into **active** (fit current capacity) and **deferred** (need higher energy), with unlock cues.
+Task XP history — each completed task earns XP based on cognitive load (load × 10).
 
-![CLCS task routing](docs/screenshots/03-clcs-routing.png)
+![XP points](docs/screenshots/03-xp-points.png)
 
 ### 4. AI Co-Pilot
 
-Context-aware chat that plans the day, proposes task cards, and replies in the user's language (e.g. Georgian or English).
+Context-aware chat and task suggestions in the user’s language.
 
 ![AI Co-Pilot chat](docs/screenshots/04-copilot-chat.png)
 
 ### 5. Project Memory (RAG)
 
-Paste project notes → embed → retrieve similar chunks → generate milestones with **Retrieved context** and similarity scores.
+Retrieved project context with similarity scores and planned milestones.
 
 ![Project Memory RAG](docs/screenshots/05-project-memory.png)
 
 ### 6. Goals and milestones
 
-Multi-day goal decomposition into milestones and child tasks, scheduled against predicted capacity.
+Goal → milestone → task hierarchy with progress tracking.
 
 ![Goals and milestones](docs/screenshots/06-goals-milestones.png)
 
-### 7. Brain dump
+### 7. Review summary
 
-Messy free text becomes structured tasks with cognitive load scores, ready for review before saving.
+Activity summary export — completed tasks, XP, and energy check-ins for a chosen period.
 
-![Brain dump parsing](docs/screenshots/07-brain-dump.png)
+![Review summary](docs/screenshots/07-review-summary.png)
 
 ### 8. Integrations
 
-Google Calendar (energy + schedule context) and ClickUp (assigned tasks synced into the pool).
+Google Calendar and ClickUp connected in Settings.
 
 ![Integrations settings](docs/screenshots/08-integrations.png)
 
-> **Note:** If an image does not appear yet, place a matching PNG in \docs/screenshots/\ using the filename in the path above. See [CAPTURE.md](docs/screenshots/CAPTURE.md) for a capture checklist.
-
+---
 
 ## What Freeside Does
 
